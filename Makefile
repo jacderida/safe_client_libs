@@ -13,10 +13,22 @@ UUID := $(shell uuidgen | sed 's/-//g')
 build-container:
 	rm -rf target/
 	docker rmi -f maidsafe/safe-client-libs-build:build
-	docker build -f scripts/Dockerfile.build -t maidsafe/safe-client-libs-build:build .
+	docker build -f scripts/Dockerfile.build \
+		-t maidsafe/safe-client-libs-build:build \
+		--build-arg build_type="real" .
+
+build-dev-container:
+	rm -rf target/
+	docker rmi -f maidsafe/safe-client-libs-build:build-mock
+	docker build -f scripts/Dockerfile.build \
+		-t maidsafe/safe-client-libs-build:build-mock \
+		--build-arg build_type="mock" .
 
 push-container:
 	docker push maidsafe/safe-client-libs-build:build
+
+push-dev-container:
+	docker push maidsafe/safe-client-libs-build:build-mock
 
 clean:
 	@if docker ps -a | grep safe_app_build &> /dev/null; then \
