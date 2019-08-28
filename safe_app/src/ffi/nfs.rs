@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -134,11 +134,14 @@ pub unsafe extern "C" fn dir_update_file(
 /// Delete the file in the parent directory.
 ///
 /// If `version` is `GET_NEXT_VERSION`, the correct version is obtained automatically.
+/// If `published` is false then the file is deleted from the network. Else, only the file's entry
+/// is removed from the container.
 #[no_mangle]
 pub unsafe extern "C" fn dir_delete_file(
     app: *const App,
     parent_info: *const MDataInfo,
     file_name: *const c_char,
+    published: bool,
     version: u64,
     user_data: *mut c_void,
     o_cb: extern "C" fn(user_data: *mut c_void, result: *const FfiResult, new_version: u64),
@@ -153,7 +156,7 @@ pub unsafe extern "C" fn dir_delete_file(
             } else {
                 Version::Custom(version)
             };
-            file_helper::delete(client.clone(), parent_info, file_name, version)
+            file_helper::delete(client.clone(), parent_info, file_name, published, version)
         })
     })
 }

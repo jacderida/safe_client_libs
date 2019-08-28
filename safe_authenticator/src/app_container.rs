@@ -12,9 +12,8 @@ use crate::access_container;
 use crate::client::AuthClient;
 use crate::{AuthError, AuthFuture};
 use futures::Future;
-use routing::{Action, EntryActions, PermissionSet, User};
-use rust_sodium::crypto::sign;
 use safe_core::{app_container_name, nfs, Client, FutureExt, MDataInfo, DIR_TAG};
+use safe_nd::{MDataAction, MDataKind, MDataPermissionSet, MDataSeqEntryActions, PublicKey};
 
 /// Returns an app's dedicated container if available and stored in the access container,
 /// `None` otherwise.
@@ -32,7 +31,7 @@ pub fn fetch(client: &AuthClient, app_id: &str) -> Box<AuthFuture<Option<MDataIn
 pub fn fetch_or_create(
     client: &AuthClient,
     app_id: &str,
-    app_sign_pk: sign::PublicKey,
+    app_pk: PublicKey,
 ) -> Box<AuthFuture<MDataInfo>> {
     let c2 = client.clone();
     let c3 = client.clone();
@@ -44,18 +43,18 @@ pub fn fetch_or_create(
                 Some(mdata_info) => {
                     // Reuse the already existing app container and update
                     // permissions for it
-                    let ps = PermissionSet::new()
-                        .allow(Action::Insert)
-                        .allow(Action::Update)
-                        .allow(Action::Delete)
-                        .allow(Action::ManagePermissions);
+                    let ps = MDataPermissionSet::new()
+                        .allow(MDataAction::Read)
+                        .allow(MDataAction::Insert)
+                        .allow(MDataAction::Update)
+                        .allow(MDataAction::Delete)
+                        .allow(MDataAction::ManagePermissions);
 
-                    c2.get_mdata_version(mdata_info.name, mdata_info.type_tag)
+                    c2.get_mdata_version(*mdata_info.address())
                         .and_then(move |version| {
                             c2.set_mdata_user_permissions(
-                                mdata_info.name,
-                                mdata_info.type_tag,
-                                User::Key(app_sign_pk),
+                                *mdata_info.address(),
+                                app_pk,
                                 ps,
                                 version + 1,
                             )
@@ -66,7 +65,7 @@ pub fn fetch_or_create(
                 }
                 None => {
                     // If the container is not found, create it
-                    create(&c2, app_sign_pk)
+                    create(&c2, app_pk)
                         .and_then(move |md_info| {
                             let _ = ac_entries.insert(app_cont_name, md_info.clone());
 
@@ -100,20 +99,20 @@ pub fn remove(client: AuthClient, app_id: &str) -> Box<AuthFuture<bool>> {
                 Some(mdata_info) => {
                     let c3 = c2.clone();
 
-                    c2.list_mdata_entries(mdata_info.name, mdata_info.type_tag)
+                    c2.list_seq_mdata_entries(mdata_info.name(), mdata_info.type_tag())
                         .and_then(move |entries| {
                             // Remove all entries in MData
                             let actions = entries.iter().fold(
-                                EntryActions::new(),
+                                MDataSeqEntryActions::new(),
                                 |actions, (entry_name, val)| {
-                                    actions.del(entry_name.clone(), val.entry_version + 1)
+                                    actions.del(entry_name.clone(), val.version + 1)
                                 },
                             );
 
-                            c3.mutate_mdata_entries(
-                                mdata_info.name,
-                                mdata_info.type_tag,
-                                actions.into(),
+                            c3.mutate_seq_mdata_entries(
+                                mdata_info.name(),
+                                mdata_info.type_tag(),
+                                actions,
                             )
                         })
                         .map_err(From::from)
@@ -138,17 +137,18 @@ pub fn remove(client: AuthClient, app_id: &str) -> Box<AuthFuture<bool>> {
 }
 
 // Creates a new app's dedicated container
-fn create(client: &AuthClient, app_sign_pk: sign::PublicKey) -> Box<AuthFuture<MDataInfo>> {
-    let dir = fry!(MDataInfo::random_private(DIR_TAG).map_err(AuthError::from));
+fn create(client: &AuthClient, app_pk: PublicKey) -> Box<AuthFuture<MDataInfo>> {
+    let dir = fry!(MDataInfo::random_private(MDataKind::Seq, DIR_TAG).map_err(AuthError::from));
     nfs::create_dir(
         client,
         &dir,
         btree_map![],
-        btree_map![User::Key(app_sign_pk) => PermissionSet::new()
-                .allow(Action::Insert)
-                .allow(Action::Update)
-                .allow(Action::Delete)
-                .allow(Action::ManagePermissions)],
+        btree_map![app_pk => MDataPermissionSet::new()
+                .allow(MDataAction::Read)
+                .allow(MDataAction::Insert)
+                .allow(MDataAction::Update)
+                .allow(MDataAction::Delete)
+                .allow(MDataAction::ManagePermissions)],
     )
     .map(move |()| dir)
     .map_err(From::from)

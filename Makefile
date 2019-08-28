@@ -7,15 +7,16 @@ PWD := $(shell echo $$PWD)
 USER_ID := $(shell id -u)
 GROUP_ID := $(shell id -g)
 UNAME_S := $(shell uname -s)
-S3_BUCKET := safe-client-libs-jenkins
+S3_BUCKET := safe-jenkins-build-artifacts
+UUID := $(shell uuidgen | sed 's/-//g')
 
 build-container:
 	rm -rf target/
-	docker rmi -f maidsafe/safe-client-libs-build:${SAFE_APP_VERSION}
-	docker build -f scripts/Dockerfile.build -t maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} .
+	docker rmi -f maidsafe/safe-client-libs-build:build
+	docker build -f scripts/Dockerfile.build -t maidsafe/safe-client-libs-build:build .
 
 push-container:
-	docker push maidsafe/safe-client-libs-build:${SAFE_APP_VERSION}
+	docker push maidsafe/safe-client-libs-build:build
 
 clean:
 	@if docker ps -a | grep safe_app_build &> /dev/null; then \
@@ -25,7 +26,7 @@ clean:
 build:
 	rm -rf artifacts
 ifeq ($(UNAME_S),Linux)
-	./scripts/build-with-container "real" "${SAFE_APP_VERSION}"
+	./scripts/build-with-container "real"
 else
 	./scripts/build-real
 endif
@@ -35,7 +36,7 @@ endif
 build-mock:
 	rm -rf artifacts
 ifeq ($(UNAME_S),Linux)
-	./scripts/build-with-container "mock" "${SAFE_APP_VERSION}"
+	./scripts/build-with-container "mock"
 else
 	./scripts/build-mock
 endif
@@ -85,8 +86,24 @@ package-deploy-artifacts:
 	@rm -rf deploy
 	docker run --rm -v "${PWD}":/usr/src/safe_client_libs:Z \
 		-u ${USER_ID}:${GROUP_ID} \
-		maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} \
+		maidsafe/safe-client-libs-build:build \
 		scripts/package-runner-container
+
+retrieve-cache:
+ifndef SCL_BRANCH
+	@echo "A branch reference must be provided."
+	@echo "Please set SCL_BRANCH to a valid branch reference."
+	@exit 1
+endif
+ifeq ($(OS),Windows_NT)
+	aws s3 cp \
+		--no-sign-request \
+		--region eu-west-2 \
+		s3://${S3_BUCKET}/scl-${SCL_BRANCH}-windows-cache.tar.gz .
+endif
+	mkdir target
+	tar -C target -xvf scl-${SCL_BRANCH}-windows-cache.tar.gz
+	rm scl-${SCL_BRANCH}-windows-cache.tar.gz
 
 retrieve-build-artifacts:
 ifndef SCL_BRANCH
@@ -171,26 +188,6 @@ endif
 	rm ${SCL_BRANCH}-${SCL_BUILD_NUMBER}-scl-osx-x86_64.tar.gz
 	rm ${SCL_BRANCH}-${SCL_BUILD_NUMBER}-scl-mock-osx-x86_64.tar.gz
 
-test-artifacts-mock:
-ifeq ($(UNAME_S),Linux)
-	docker run --rm -v "${PWD}":/usr/src/safe_client_libs:Z \
-		-u ${USER_ID}:${GROUP_ID} \
-		-e CARGO_TARGET_DIR=/target \
-		-e SCL_TEST_SUITE=mock \
-		maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} \
-		scripts/test-runner-container
-else
-	./scripts/test-mock
-endif
-
-test-artifacts-integration:
-	docker run --rm -v "${PWD}":/usr/src/safe_client_libs:Z \
-		-u ${USER_ID}:${GROUP_ID} \
-		-e CARGO_TARGET_DIR=/target \
-		-e SCL_TEST_SUITE=integration \
-		maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} \
-		scripts/test-runner-container
-
 test-artifacts-binary:
 ifndef SCL_BCT_PATH
 	@echo "A value must be supplied for the previous binary compatibility test suite."
@@ -205,19 +202,47 @@ endif
 		-e CARGO_TARGET_DIR=/target \
 		-e COMPAT_TESTS=/bct/tests \
 		-e SCL_TEST_SUITE=binary \
-		maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} \
+		maidsafe/safe-client-libs-build:build \
 		scripts/test-runner-container
 
 tests: clean
+	rm -rf artifacts
+ifeq ($(UNAME_S),Linux)
 	rm -rf target/
-	docker run --name safe_app_build \
+	docker run --name "safe_app_tests-${UUID}" \
 		-v "${PWD}":/usr/src/safe_client_libs \
 		-u ${USER_ID}:${GROUP_ID} \
 		-e CARGO_TARGET_DIR=/target \
-		maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} \
+		maidsafe/safe-client-libs-build:build \
 		scripts/test-mock
-	docker cp safe_app_build:/target .
-	docker rm -f safe_app_build
+	docker cp "safe_app_tests-${UUID}":/target .
+	docker rm -f "safe_app_tests-${UUID}"
+else
+	./scripts/test-mock
+endif
+	make copy-artifacts
+
+test-with-mock-vault-file: clean
+ifeq ($(UNAME_S),Darwin)
+	rm -rf artifacts
+	./scripts/test-with-mock-vault-file
+	make copy-artifacts
+else
+	@echo "Tests against the mock vault file are run only on OS X."
+	@exit 1
+endif
+
+tests-integration: clean
+	rm -rf target/
+	docker run --rm -v "${PWD}":/usr/src/safe_client_libs \
+		-u ${USER_ID}:${GROUP_ID} \
+		-e CARGO_TARGET_DIR=/target \
+		maidsafe/safe-client-libs-build:build \
+		scripts/test-integration
 
 debug:
-	docker run --rm -v "${PWD}":/usr/src/crust maidsafe/safe-client-libs-build:${SAFE_APP_VERSION} /bin/bash
+	docker run --rm -v "${PWD}":/usr/src/crust maidsafe/safe-client-libs-build:build /bin/bash
+
+copy-artifacts:
+	mkdir artifacts
+	find target/release -maxdepth 1 -type f -exec cp '{}' artifacts \;

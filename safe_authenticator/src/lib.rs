@@ -24,10 +24,6 @@
 )]
 #![deny(
     bad_style,
-    clippy::all,
-    clippy::option_unwrap_used,
-    clippy::unicode_not_nfc,
-    clippy::wrong_pub_self_convention,
     deprecated,
     improper_ctypes,
     missing_docs,
@@ -43,7 +39,11 @@
     unused_comparisons,
     unused_features,
     unused_parens,
-    while_true
+    while_true,
+    clippy::all,
+    clippy::option_unwrap_used,
+    clippy::unicode_not_nfc,
+    clippy::wrong_pub_self_convention
 )]
 #![warn(
     trivial_casts,
@@ -55,9 +55,6 @@
 )]
 #![allow(
     box_pointers,
-    clippy::implicit_hasher,
-    clippy::too_many_arguments,
-    clippy::use_debug,
     missing_copy_implementations,
     missing_debug_implementations,
     variant_size_differences
@@ -67,8 +64,6 @@
 extern crate ffi_utils;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
 #[macro_use]
 extern crate safe_core;
 #[macro_use]
@@ -109,15 +104,15 @@ use futures::sync::mpsc;
 use futures::{Future, IntoFuture};
 use maidsafe_utilities::thread::{self, Joiner};
 #[cfg(feature = "mock-network")]
-use safe_core::MockRouting;
+use safe_core::ConnectionManager;
 use safe_core::{event_loop, CoreMsg, CoreMsgTx, FutureExt, NetworkEvent, NetworkTx};
 use std::sync::mpsc as std_mpsc;
 use std::sync::mpsc::sync_channel;
 use std::sync::Mutex;
-use tokio_core::reactor::{Core, Handle};
+use tokio::runtime::current_thread::{Handle, Runtime};
 
 /// Future type specialised with `AuthError` as an error type.
-pub type AuthFuture<T> = Future<Item = T, Error = AuthError>;
+pub type AuthFuture<T> = dyn Future<Item = T, Error = AuthError>;
 /// Transmitter of AuthClient messages.
 pub type AuthMsgTx = CoreMsgTx<AuthClient, ()>;
 
@@ -143,7 +138,7 @@ impl Authenticator {
     /// Send a message to the authenticator event loop.
     pub fn send<F>(&self, f: F) -> Result<(), AuthError>
     where
-        F: FnOnce(&AuthClient) -> Option<Box<Future<Item = (), Error = ()>>> + Send + 'static,
+        F: FnOnce(&AuthClient) -> Option<Box<dyn Future<Item = (), Error = ()>>> + Send + 'static,
     {
         let msg = CoreMsg::new(|client, _| f(client));
         let core_tx = unwrap!(self.core_tx.lock());
@@ -154,7 +149,7 @@ impl Authenticator {
     pub fn create_acc<S, N>(
         locator: S,
         password: S,
-        invitation: S,
+        balance_sk: threshold_crypto::SecretKey,
         disconnect_notifier: N,
     ) -> Result<Self, AuthError>
     where
@@ -163,11 +158,10 @@ impl Authenticator {
     {
         let locator = locator.into();
         let password = password.into();
-        let invitation = invitation.into();
 
         Self::create_acc_impl(
             move |el_h, core_tx, net_tx| {
-                AuthClient::registered(&locator, &password, &invitation, el_h, core_tx, net_tx)
+                AuthClient::registered(&locator, &password, balance_sk, el_h, core_tx, net_tx)
             },
             disconnect_notifier,
         )
@@ -185,7 +179,7 @@ impl Authenticator {
         let (tx, rx) = sync_channel(0);
 
         let joiner = thread::named("Core Event Loop", move || {
-            let el = try_tx!(Core::new(), tx);
+            let mut el = try_tx!(Runtime::new(), tx);
             let el_h = el.handle();
 
             let (core_tx, core_rx) = mpsc::unbounded();
@@ -200,7 +194,7 @@ impl Authenticator {
                     ok!(())
                 })
                 .for_each(|_| Ok(()));
-            el_h.spawn(net_obs_fut);
+            let _ = el.spawn(net_obs_fut);
 
             let client = try_tx!(create_client_fn(el_h, core_tx.clone(), net_tx), tx);
 
@@ -267,7 +261,7 @@ impl Authenticator {
         let (tx, rx) = sync_channel(0);
 
         let joiner = thread::named("Core Event Loop", move || {
-            let el = try_tx!(Core::new(), tx);
+            let mut el = try_tx!(Runtime::new(), tx);
             let el_h = el.handle();
 
             let (core_tx, core_rx) = mpsc::unbounded();
@@ -282,7 +276,7 @@ impl Authenticator {
                     ok!(())
                 })
                 .for_each(|_| Ok(()));
-            el_h.spawn(net_obs_fut);
+            let _ = el.spawn(net_obs_fut);
 
             let client = try_tx!(create_client_fn(el_h, core_tx_clone, net_tx), tx);
 
@@ -363,9 +357,10 @@ impl Authenticator {
         N: FnMut() + Send + 'static,
     {
         let seed = seed.into();
+        let balance_sk = threshold_crypto::SecretKey::random();
         Self::login_impl(
             move |el_h, core_tx, net_tx| {
-                AuthClient::registered_with_seed(&seed, el_h, core_tx, net_tx)
+                AuthClient::registered_with_seed(&seed, balance_sk, el_h, core_tx, net_tx)
             },
             disconnect_notifier,
         )
@@ -391,29 +386,28 @@ impl Authenticator {
     fn create_acc_with_hook<F, S, N>(
         locator: S,
         password: S,
-        invitation: S,
+        balance_sk: threshold_crypto::SecretKey,
         disconnect_notifier: N,
-        routing_wrapper_fn: F,
+        connection_manager_wrapper_fn: F,
     ) -> Result<Self, AuthError>
     where
         N: FnMut() + Send + 'static,
-        F: Fn(MockRouting) -> MockRouting + Send + 'static,
+        F: Fn(ConnectionManager) -> ConnectionManager + Send + 'static,
         S: Into<String>,
     {
         let locator = locator.into();
         let password = password.into();
-        let invitation = invitation.into();
 
         Self::create_acc_impl(
             move |el_h, core_tx_clone, net_tx| {
                 AuthClient::registered_with_hook(
                     &locator,
                     &password,
-                    &invitation,
+                    balance_sk,
                     el_h,
                     core_tx_clone,
                     net_tx,
-                    routing_wrapper_fn,
+                    connection_manager_wrapper_fn,
                 )
             },
             disconnect_notifier,
@@ -425,11 +419,11 @@ impl Authenticator {
         locator: S,
         password: S,
         disconnect_notifier: N,
-        routing_wrapper_fn: F,
+        connection_manager_wrapper_fn: F,
     ) -> Result<Self, AuthError>
     where
         S: Into<String>,
-        F: Fn(MockRouting) -> MockRouting + Send + 'static,
+        F: Fn(ConnectionManager) -> ConnectionManager + Send + 'static,
         N: FnMut() + Send + 'static,
     {
         let locator = locator.into();
@@ -443,7 +437,7 @@ impl Authenticator {
                     el_h,
                     core_tx,
                     net_tx,
-                    routing_wrapper_fn,
+                    connection_manager_wrapper_fn,
                 )
             },
             disconnect_notifier,

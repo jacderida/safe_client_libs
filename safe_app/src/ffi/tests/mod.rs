@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -12,17 +12,13 @@ mod nfs;
 use super::*;
 use crate::ffi::app_is_mock;
 use crate::ffi::ipc::decode_ipc_msg;
-use crate::test_utils::create_app;
 use crate::test_utils::gen_app_exchange_info;
 use ffi_utils::test_utils::call_1;
-use routing::ImmutableData;
 use safe_authenticator::ffi::ipc::encode_auth_resp;
 use safe_authenticator::test_utils;
 use safe_core::ffi::ipc::resp::AuthGranted as FfiAuthGranted;
-use safe_core::ffi::AccountInfo;
 use safe_core::ipc::req::{AuthReq, ContainerPermissions};
 use safe_core::ipc::{gen_req_id, AuthGranted, Permission};
-use safe_core::Client;
 use std::collections::HashMap;
 use App;
 
@@ -57,45 +53,19 @@ fn test_not_mock_build() {
     assert_eq!(app_is_mock(), false);
 }
 
-// Test account usage statistics before and after a mutation.
-#[test]
-fn account_info() {
-    let app = create_app();
-    let app = Box::into_raw(Box::new(app));
-
-    let orig_stats: AccountInfo =
-        unsafe { unwrap!(call_1(|ud, cb| app_account_info(app, ud, cb))) };
-    assert!(orig_stats.mutations_available > 0);
-
-    unsafe {
-        unwrap!((*app).send(move |client, _| client
-            .put_idata(ImmutableData::new(vec![1, 2, 3]))
-            .map_err(move |_| ())
-            .into_box()
-            .into()));
-    }
-
-    let stats: AccountInfo = unsafe { unwrap!(call_1(|ud, cb| app_account_info(app, ud, cb))) };
-    assert_eq!(stats.mutations_done, orig_stats.mutations_done + 1);
-    assert_eq!(
-        stats.mutations_available,
-        orig_stats.mutations_available - 1
-    );
-
-    unsafe { app_free(app) };
-}
-
 // Test disconnection and reconnection with apps.
 #[cfg(all(test, feature = "mock-network"))]
+#[ignore] // FIXME: ignoring this test for now until we figure out the disconnection semantics for Phase 1
 #[test]
 fn network_status_callback() {
     use ffi_utils::test_utils::{call_0, call_1_with_custom, send_via_user_data_custom, UserData};
     use maidsafe_utilities::serialisation::serialise;
     use safe_core::ipc::BootstrapConfig;
-    use std::os::raw::c_void;
-    use std::sync::mpsc;
-    use std::sync::mpsc::{Receiver, Sender};
-    use std::time::Duration;
+    use std::{
+        os::raw::c_void,
+        sync::mpsc::{self, Receiver, Sender},
+        time::Duration,
+    };
 
     {
         let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
@@ -175,6 +145,7 @@ fn test_app_container_name() {
         &auth,
         &AuthReq {
             app: app_info,
+            app_permissions: Default::default(),
             app_container: true,
             containers: HashMap::new(),
         },
@@ -203,6 +174,7 @@ fn app_authentication() {
     let containers = create_containers_req();
     let auth_req = AuthReq {
         app: app_exchange_info.clone(),
+        app_permissions: Default::default(),
         app_container: true,
         containers,
     };

@@ -29,10 +29,11 @@ pub struct File {
     pub user_metadata_cap: usize,
     /// Name of the `ImmutableData` containing the content of this file.
     pub data_map_name: XorNameArray,
+    /// Published status of the file
+    pub published: bool,
 }
 
 impl Drop for File {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         let _ = unsafe {
             Vec::from_raw_parts(

@@ -15,17 +15,17 @@ use crate::nfs::NfsFuture;
 use crate::utils::FutureExt;
 use futures::{future, Future};
 use maidsafe_utilities::serialisation::{deserialise, serialise};
-use routing::XorName;
+use safe_nd::{IDataAddress, XorName};
 use self_encryption::DataMap;
 
 // Get `DataMap` from the network.
 // If the `DataMap` is encrypted, an `encryption_key` must be passed in to decrypt it.
 pub fn get(
     client: &impl Client,
-    name: &XorName,
+    address: IDataAddress,
     encryption_key: Option<shared_secretbox::Key>,
 ) -> Box<NfsFuture<DataMap>> {
-    immutable_data::get_value(client, name, encryption_key)
+    immutable_data::get_value(client, address, encryption_key)
         .map_err(From::from)
         .and_then(move |content| deserialise(&content).map_err(From::from))
         .into_box()
@@ -36,6 +36,7 @@ pub fn get(
 pub fn put(
     client: &impl Client,
     data_map: &DataMap,
+    published: bool,
     encryption_key: Option<shared_secretbox::Key>,
 ) -> Box<NfsFuture<XorName>> {
     let client = client.clone();
@@ -43,7 +44,9 @@ pub fn put(
 
     future::result(serialise(&data_map))
         .map_err(From::from)
-        .and_then(move |encoded| immutable_data::create(&client, &encoded, encryption_key))
+        .and_then(move |encoded| {
+            immutable_data::create(&client, &encoded, published, encryption_key)
+        })
         .and_then(move |data| {
             let name = *data.name();
             client2.put_idata(data).map(move |_| name)

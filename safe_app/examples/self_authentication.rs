@@ -1,10 +1,11 @@
 // Copyright 2018 MaidSafe.net limited.
 //
-// This SAFE Network Software is licensed to you under The General Public License (GPL), version 3.
-// Unless required by applicable law or agreed to in writing, the SAFE Network Software distributed
-// under the GPL Licence is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied. Please review the Licences for the specific language governing
-// permissions and limitations relating to use of the SAFE Network Software.
+// This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
+// modified, or distributed except according to those terms. Please review the Licences for the
+// specific language governing permissions and limitations relating to use of the SAFE Network
+// Software.
 
 //! Self-authentication example.
 
@@ -35,7 +36,11 @@
     unused_comparisons,
     unused_features,
     unused_parens,
-    while_true
+    while_true,
+    clippy::all,
+    clippy::option_unwrap_used,
+    clippy::unicode_not_nfc,
+    clippy::wrong_pub_self_convention
 )]
 #![warn(
     trivial_casts,
@@ -51,33 +56,16 @@
     missing_debug_implementations,
     variant_size_differences
 )]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    deny(clippy, unicode_not_nfc, wrong_pub_self_convention, option_unwrap_used)
-)]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    allow(implicit_hasher, too_many_arguments, use_debug)
-)]
 
 #[macro_use]
 extern crate unwrap;
 
-use clap::{App, Arg};
-use safe_app::{utils, ClientError, CoreError};
+use safe_app::CoreError;
 use safe_authenticator::{AuthError, Authenticator};
+use safe_nd::Error as SndError;
 
 fn main() {
     unwrap!(maidsafe_utilities::log::init(true));
-
-    let matches = App::new("self_authentication")
-        .arg(
-            Arg::with_name("invite")
-                .long("invite")
-                .takes_value(true)
-                .help("Use the given invite."),
-        )
-        .get_matches();
 
     let mut secret_0 = String::new();
     let mut secret_1 = String::new();
@@ -100,25 +88,15 @@ fn main() {
         let _ = std::io::stdin().read_line(&mut secret_1);
         secret_1 = secret_1.trim().to_string();
 
-        let invitation: String = if let Some(i) = matches.value_of("invite") {
-            i.to_string()
-        } else {
-            unwrap!(utils::generate_random_string(10))
-        };
+        // FIXME - pass secret key of the wallet as an argument
+        let bls_sk = threshold_crypto::SecretKey::random();
 
         // Account Creation
         println!("\nTrying to create an account...");
 
-        match Authenticator::create_acc(
-            secret_0.as_str(),
-            secret_1.as_str(),
-            invitation.as_str(),
-            || (),
-        ) {
+        match Authenticator::create_acc(secret_0.as_str(), secret_1.as_str(), bls_sk, || ()) {
             Ok(_) => (),
-            Err(AuthError::CoreError(CoreError::RoutingClientError(
-                ClientError::AccountExists,
-            ))) => {
+            Err(AuthError::CoreError(CoreError::DataError(SndError::LoginPacketExists))) => {
                 println!(
                     "ERROR: This domain is already taken. Please retry with different \
                      locator and/or password"

@@ -13,8 +13,9 @@ use crate::self_encryption_storage::SelfEncryptionStorage;
 use crate::utils::{self, FutureExt};
 use futures::Future;
 use maidsafe_utilities::serialisation::{deserialise, serialise};
-use routing::{ImmutableData, XorName};
+use safe_nd::{IData, IDataAddress, PubImmutableData, UnpubImmutableData};
 use self_encryption::{DataMap, SelfEncryptor};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 enum DataTypeEncoding {
@@ -27,12 +28,13 @@ enum DataTypeEncoding {
 pub fn create(
     client: &impl Client,
     value: &[u8],
+    published: bool,
     encryption_key: Option<shared_secretbox::Key>,
-) -> Box<CoreFuture<ImmutableData>> {
+) -> Box<CoreFuture<IData>> {
     trace!("Creating conformant ImmutableData.");
 
     let client = client.clone();
-    let storage = SelfEncryptionStorage::new(client.clone());
+    let storage = SelfEncryptionStorage::new(client.clone(), published);
     let self_encryptor = fry!(SelfEncryptor::new(storage, DataMap::None));
 
     self_encryptor
@@ -51,7 +53,7 @@ pub fn create(
                 ),))
             };
 
-            pack(client, value)
+            pack(client, value, published)
         })
         .into_box()
 }
@@ -59,11 +61,11 @@ pub fn create(
 /// Get the raw bytes from `ImmutableData` created via the `create` function in this module.
 pub fn extract_value(
     client: &impl Client,
-    data: &ImmutableData,
+    data: &IData,
     decryption_key: Option<shared_secretbox::Key>,
 ) -> Box<CoreFuture<Vec<u8>>> {
     let client = client.clone();
-
+    let published = data.is_pub();
     unpack(client.clone(), data)
         .and_then(move |value| {
             let data_map = if let Some(key) = decryption_key {
@@ -73,7 +75,7 @@ pub fn extract_value(
                 deserialise(&value)?
             };
 
-            let storage = SelfEncryptionStorage::new(client);
+            let storage = SelfEncryptionStorage::new(client, published);
             Ok(SelfEncryptor::new(storage, data_map)?)
         })
         .and_then(|self_encryptor| {
@@ -88,24 +90,28 @@ pub fn extract_value(
 /// function.
 pub fn get_value(
     client: &impl Client,
-    name: &XorName,
+    address: IDataAddress,
     decryption_key: Option<shared_secretbox::Key>,
 ) -> Box<CoreFuture<Vec<u8>>> {
     let client2 = client.clone();
     client
-        .get_idata(*name)
+        .get_idata(address)
         .and_then(move |data| extract_value(&client2, &data, decryption_key))
         .into_box()
 }
 
 // TODO: consider rewriting these two function to not use recursion.
 
-fn pack(client: impl Client, value: Vec<u8>) -> Box<CoreFuture<ImmutableData>> {
-    let data = ImmutableData::new(value);
+fn pack(client: impl Client, value: Vec<u8>, published: bool) -> Box<CoreFuture<IData>> {
+    let data: IData = if published {
+        PubImmutableData::new(value).into()
+    } else {
+        UnpubImmutableData::new(value, client.public_key()).into()
+    };
     let serialised_data = fry!(serialise(&data));
 
     if !data.validate_size() {
-        let storage = SelfEncryptionStorage::new(client.clone());
+        let storage = SelfEncryptionStorage::new(client.clone(), published);
         let self_encryptor = fry!(SelfEncryptor::new(storage, DataMap::None));
         self_encryptor
             .write(&serialised_data, 0)
@@ -113,7 +119,7 @@ fn pack(client: impl Client, value: Vec<u8>) -> Box<CoreFuture<ImmutableData>> {
             .map_err(From::from)
             .and_then(move |(data_map, _)| {
                 let value = fry!(serialise(&DataTypeEncoding::DataMap(data_map)));
-                pack(client, value)
+                pack(client, value, published)
             })
             .into_box()
     } else {
@@ -121,11 +127,12 @@ fn pack(client: impl Client, value: Vec<u8>) -> Box<CoreFuture<ImmutableData>> {
     }
 }
 
-fn unpack(client: impl Client, data: &ImmutableData) -> Box<CoreFuture<Vec<u8>>> {
+fn unpack(client: impl Client, data: &IData) -> Box<CoreFuture<Vec<u8>>> {
+    let published = data.is_pub();
     match fry!(deserialise(data.value())) {
         DataTypeEncoding::Serialised(value) => ok!(value),
         DataTypeEncoding::DataMap(data_map) => {
-            let storage = SelfEncryptionStorage::new(client.clone());
+            let storage = SelfEncryptionStorage::new(client.clone(), published);
             let self_encryptor = fry!(SelfEncryptor::new(storage, data_map));
             let length = self_encryptor.len();
             self_encryptor
@@ -175,7 +182,7 @@ mod tests {
     fn create_and_retrieve(size: usize) {
         let value = unwrap!(utils::generate_random_vector(size));
 
-        // Unencrypted
+        // Unencrypted and published
         {
             let value_before = value.clone();
 
@@ -183,15 +190,15 @@ mod tests {
                 let client2 = client.clone();
                 let client3 = client.clone();
 
-                create(client, &value_before.clone(), None)
+                create(client, &value_before.clone(), true, None)
                     .then(move |res| {
                         let data_before = unwrap!(res);
-                        let data_name = *data_before.name();
-                        client2.put_idata(data_before).map(move |_| data_name)
+                        let address = *data_before.address();
+                        client2.put_idata(data_before).map(move |_| address)
                     })
                     .then(move |res| {
-                        let data_name = unwrap!(res);
-                        get_value(&client3, &data_name, None)
+                        let address = unwrap!(res);
+                        get_value(&client3, address, None)
                     })
                     .then(move |res| {
                         let value_after = unwrap!(res);
@@ -201,7 +208,7 @@ mod tests {
             })
         }
 
-        // Encrypted
+        // Encrypted and unpublished
         {
             let value_before = value.clone();
             let key = shared_secretbox::gen_key();
@@ -210,15 +217,15 @@ mod tests {
                 let client2 = client.clone();
                 let client3 = client.clone();
 
-                create(client, &value_before.clone(), Some(key.clone()))
+                create(client, &value_before.clone(), false, Some(key.clone()))
                     .then(move |res| {
                         let data_before = unwrap!(res);
-                        let data_name = *data_before.name();
-                        client2.put_idata(data_before).map(move |_| data_name)
+                        let address = *data_before.address();
+                        client2.put_idata(data_before).map(move |_| address)
                     })
                     .then(move |res| {
-                        let data_name = unwrap!(res);
-                        get_value(&client3, &data_name, Some(key))
+                        let address = unwrap!(res);
+                        get_value(&client3, address, Some(key))
                     })
                     .then(move |res| {
                         let value_after = unwrap!(res);
@@ -237,15 +244,15 @@ mod tests {
                 let client2 = client.clone();
                 let client3 = client.clone();
 
-                create(client, &value, None)
+                create(client, &value, true, None)
                     .then(move |res| {
                         let data = unwrap!(res);
-                        let data_name = *data.name();
-                        client2.put_idata(data).map(move |_| data_name)
+                        let address = *data.address();
+                        client2.put_idata(data).map(move |_| address)
                     })
                     .then(move |res| {
-                        let data_name = unwrap!(res);
-                        get_value(&client3, &data_name, Some(key))
+                        let address = unwrap!(res);
+                        get_value(&client3, address, Some(key))
                     })
                     .then(|res| {
                         assert!(res.is_err());
@@ -263,7 +270,32 @@ mod tests {
                 let client2 = client.clone();
                 let client3 = client.clone();
 
-                create(client, &value, Some(key))
+                create(client, &value, true, Some(key))
+                    .then(move |res| {
+                        let data = unwrap!(res);
+                        let address = *data.address();
+                        client2.put_idata(data).map(move |_| address)
+                    })
+                    .then(move |res| {
+                        let address = unwrap!(res);
+                        get_value(&client3, address, None)
+                    })
+                    .then(|res| {
+                        assert!(res.is_err());
+                        finish()
+                    })
+            })
+        }
+
+        // Put published Retrieve unpublished - Should fail
+        {
+            let value = value.clone();
+
+            random_client(move |client| {
+                let client2 = client.clone();
+                let client3 = client.clone();
+
+                create(client, &value, true, None)
                     .then(move |res| {
                         let data = unwrap!(res);
                         let data_name = *data.name();
@@ -271,7 +303,34 @@ mod tests {
                     })
                     .then(move |res| {
                         let data_name = unwrap!(res);
-                        get_value(&client3, &data_name, None)
+                        let address = IDataAddress::Unpub(data_name);
+                        get_value(&client3, address, None)
+                    })
+                    .then(|res| {
+                        assert!(res.is_err());
+                        finish()
+                    })
+            })
+        }
+
+        // Put unpublished Retrieve published - Should fail
+        {
+            let value = value.clone();
+
+            random_client(move |client| {
+                let client2 = client.clone();
+                let client3 = client.clone();
+
+                create(client, &value, false, None)
+                    .then(move |res| {
+                        let data = unwrap!(res);
+                        let data_name = *data.name();
+                        client2.put_idata(data).map(move |_| data_name)
+                    })
+                    .then(move |res| {
+                        let data_name = unwrap!(res);
+                        let address = IDataAddress::Pub(data_name);
+                        get_value(&client3, address, None)
                     })
                     .then(|res| {
                         assert!(res.is_err());

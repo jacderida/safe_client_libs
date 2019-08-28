@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -15,10 +15,13 @@ use crate::cipher_opt::CipherOpt;
 use crate::client::AppClient;
 use crate::ffi::nfs::FileContext;
 use crate::ffi::object_cache::*;
-use routing::{EntryAction, PermissionSet, User, Value};
 use rust_sodium::crypto::{box_, sign};
 use safe_core::crypto::{shared_box, shared_sign};
 use safe_core::SelfEncryptionStorage;
+use safe_nd::{
+    MDataPermissionSet, MDataSeqEntries, MDataSeqEntryActions, MDataUnseqEntries,
+    MDataUnseqEntryActions, PublicKey,
+};
 use self_encryption::{SelfEncryptor, SequentialEncryptor};
 use std::cell::{Cell, RefCell, RefMut};
 use std::collections::{BTreeMap, HashMap};
@@ -29,13 +32,16 @@ pub struct ObjectCache {
     cipher_opt: Store<CipherOpt>,
     encrypt_key: Store<box_::PublicKey>,
     secret_key: Store<shared_box::SecretKey>,
-    mdata_entries: Store<BTreeMap<Vec<u8>, Value>>,
-    mdata_entry_actions: Store<BTreeMap<Vec<u8>, EntryAction>>,
-    mdata_permissions: Store<BTreeMap<User, PermissionSet>>,
+    seq_mdata_entries: Store<MDataSeqEntries>,
+    unseq_mdata_entries: Store<MDataUnseqEntries>,
+    seq_mdata_entry_actions: Store<MDataSeqEntryActions>,
+    unseq_mdata_entry_actions: Store<MDataUnseqEntryActions>,
+    mdata_permissions: Store<BTreeMap<PublicKey, MDataPermissionSet>>,
     se_reader: Store<SelfEncryptor<SelfEncryptionStorage<AppClient>>>,
     se_writer: Store<SequentialEncryptor<SelfEncryptionStorage<AppClient>>>,
     pub_sign_key: Store<sign::PublicKey>,
     sec_sign_key: Store<shared_sign::SecretKey>,
+    pub_key: Store<PublicKey>,
     file: Store<FileContext>,
 }
 
@@ -47,13 +53,16 @@ impl ObjectCache {
             cipher_opt: Store::new(),
             encrypt_key: Store::new(),
             secret_key: Store::new(),
-            mdata_entries: Store::new(),
-            mdata_entry_actions: Store::new(),
+            seq_mdata_entries: Store::new(),
+            unseq_mdata_entries: Store::new(),
+            seq_mdata_entry_actions: Store::new(),
+            unseq_mdata_entry_actions: Store::new(),
             mdata_permissions: Store::new(),
             se_reader: Store::new(),
             se_writer: Store::new(),
             pub_sign_key: Store::new(),
             sec_sign_key: Store::new(),
+            pub_key: Store::new(),
             file: Store::new(),
         }
     }
@@ -64,13 +73,16 @@ impl ObjectCache {
         self.cipher_opt.clear();
         self.encrypt_key.clear();
         self.secret_key.clear();
-        self.mdata_entries.clear();
-        self.mdata_entry_actions.clear();
+        self.seq_mdata_entries.clear();
+        self.unseq_mdata_entries.clear();
+        self.seq_mdata_entry_actions.clear();
+        self.unseq_mdata_entry_actions.clear();
         self.mdata_permissions.clear();
         self.se_reader.clear();
         self.se_writer.clear();
         self.pub_sign_key.clear();
         self.sec_sign_key.clear();
+        self.pub_key.clear();
         self.file.clear();
     }
 }
@@ -126,25 +138,43 @@ impl_cache!(
     remove_secret_key
 );
 impl_cache!(
-    mdata_entries,
-    BTreeMap<Vec<u8>, Value>,
+    seq_mdata_entries,
+    MDataSeqEntries,
     MDataEntriesHandle,
     InvalidMDataEntriesHandle,
-    get_mdata_entries,
-    insert_mdata_entries,
-    remove_mdata_entries
+    get_seq_mdata_entries,
+    insert_seq_mdata_entries,
+    remove_seq_mdata_entries
 );
 impl_cache!(
-    mdata_entry_actions,
-    BTreeMap<Vec<u8>, EntryAction>,
+    seq_mdata_entry_actions,
+    MDataSeqEntryActions,
     MDataEntryActionsHandle,
     InvalidMDataEntryActionsHandle,
-    get_mdata_entry_actions,
-    insert_mdata_entry_actions,
-    remove_mdata_entry_actions
+    get_seq_mdata_entry_actions,
+    insert_seq_mdata_entry_actions,
+    remove_seq_mdata_entry_actions
+);
+impl_cache!(
+    unseq_mdata_entries,
+    MDataUnseqEntries,
+    MDataEntriesHandle,
+    InvalidMDataEntriesHandle,
+    get_unseq_mdata_entries,
+    insert_unseq_mdata_entries,
+    remove_unseq_mdata_entries
+);
+impl_cache!(
+    unseq_mdata_entry_actions,
+    MDataUnseqEntryActions,
+    MDataEntryActionsHandle,
+    InvalidMDataEntryActionsHandle,
+    get_unseq_mdata_entry_actions,
+    insert_unseq_mdata_entry_actions,
+    remove_unseq_mdata_entry_actions
 );
 impl_cache!(mdata_permissions,
-            BTreeMap<User, PermissionSet>,
+            BTreeMap<PublicKey, MDataPermissionSet>,
             MDataPermissionsHandle,
             InvalidMDataPermissionsHandle,
             get_mdata_permissions,
@@ -185,6 +215,15 @@ impl_cache!(
     get_sec_sign_key,
     insert_sec_sign_key,
     remove_sec_sign_key
+);
+impl_cache!(
+    pub_key,
+    PublicKey,
+    PubKeyHandle,
+    InvalidPubKeyHandle,
+    get_pub_key,
+    insert_pub_key,
+    remove_pub_key
 );
 impl_cache!(
     file,

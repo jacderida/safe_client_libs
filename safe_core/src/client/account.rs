@@ -6,14 +6,20 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+use crate::client::id::SafeKey;
 use crate::client::MDataInfo;
 use crate::crypto::{shared_box, shared_secretbox, shared_sign};
 use crate::errors::CoreError;
 use crate::DIR_TAG;
 use maidsafe_utilities::serialisation::{deserialise, serialise};
-use routing::{FullId, XorName, XOR_NAME_LEN};
 use rust_sodium::crypto::sign::Seed;
 use rust_sodium::crypto::{box_, pwhash, secretbox, sign};
+use safe_nd::{AppFullId, ClientFullId, MDataKind, PublicKey, XorName, XOR_NAME_LEN};
+use serde::{
+    ser::{SerializeStruct, Serializer},
+    Deserialize, Serialize,
+};
+use threshold_crypto::serde_impl::SerdeSecret;
 use tiny_keccak::sha3_256;
 
 /// Representing the User Account information on the network.
@@ -36,8 +42,8 @@ impl Account {
     pub fn new(maid_keys: ClientKeys) -> Result<Self, CoreError> {
         Ok(Account {
             maid_keys,
-            access_container: MDataInfo::random_private(DIR_TAG)?,
-            config_root: MDataInfo::random_private(DIR_TAG)?,
+            access_container: MDataInfo::random_private(MDataKind::Seq, DIR_TAG)?,
+            config_root: MDataInfo::random_private(MDataKind::Seq, DIR_TAG)?,
             root_dirs_created: false,
         })
     }
@@ -111,7 +117,7 @@ impl Account {
 }
 
 /// Client signing and encryption keypairs
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct ClientKeys {
     /// Signing public key
     pub sign_pk: sign::PublicKey,
@@ -123,6 +129,29 @@ pub struct ClientKeys {
     pub enc_sk: shared_box::SecretKey,
     /// Symmetric encryption key
     pub enc_key: shared_secretbox::Key,
+    /// BLS public key
+    pub bls_pk: threshold_crypto::PublicKey,
+    /// BLS private key
+    pub bls_sk: threshold_crypto::SecretKey,
+}
+
+// threshold_crypto::SecretKey cannot be serialised directly,
+// hence this trait is implemented
+impl Serialize for ClientKeys {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("ClientKeys", 7)?;
+        state.serialize_field("sign_pk", &self.sign_pk)?;
+        state.serialize_field("sign_sk", &self.sign_sk)?;
+        state.serialize_field("enc_pk", &self.enc_pk)?;
+        state.serialize_field("enc_sk", &self.enc_sk)?;
+        state.serialize_field("enc_key", &self.enc_key)?;
+        state.serialize_field("bls_pk", &self.bls_pk)?;
+        state.serialize_field("bls_sk", &SerdeSecret(&self.bls_sk))?;
+        state.end()
+    }
 }
 
 impl ClientKeys {
@@ -134,6 +163,7 @@ impl ClientKeys {
         };
         let enc = shared_box::gen_keypair();
         let enc_key = shared_secretbox::gen_key();
+        let bls_sk = threshold_crypto::SecretKey::random();
 
         ClientKeys {
             sign_pk: sign.0,
@@ -141,22 +171,39 @@ impl ClientKeys {
             enc_pk: enc.0,
             enc_sk: enc.1,
             enc_key,
+            bls_pk: bls_sk.public_key(),
+            bls_sk,
         }
+    }
+
+    /// Convert `ClientKeys` into a full client identity.
+    fn client_full_id(&self) -> ClientFullId {
+        let bls_sk = (self.bls_sk).clone();
+
+        ClientFullId::with_bls_key(bls_sk)
+    }
+
+    /// Convert `ClientKeys` into a full app identity.
+    pub fn app_full_id(&self, owner_key: PublicKey) -> AppFullId {
+        let bls_sk = (self.bls_sk).clone();
+
+        AppFullId::with_keys(bls_sk, owner_key)
+    }
+
+    /// Convert `ClientKeys` into a Client `SafeKey`.
+    pub fn client_safe_key(&self) -> SafeKey {
+        SafeKey::client(self.client_full_id())
+    }
+
+    /// Convert `ClientKeys` into an App `SafeKey`.
+    pub fn app_safe_key(&self, owner_key: PublicKey) -> SafeKey {
+        SafeKey::app(self.app_full_id(owner_key))
     }
 }
 
 impl Default for ClientKeys {
     fn default() -> Self {
         Self::new(None)
-    }
-}
-
-impl Into<FullId> for ClientKeys {
-    fn into(self) -> FullId {
-        let enc_sk = (*self.enc_sk).clone();
-        let sign_sk = (*self.sign_sk).clone();
-
-        FullId::with_keys((self.enc_pk, enc_sk), (self.sign_pk, sign_sk))
     }
 }
 

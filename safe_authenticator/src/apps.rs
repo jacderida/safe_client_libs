@@ -17,14 +17,13 @@ use crate::{app_container, AuthError};
 use ffi_utils::{vec_into_raw_parts, ReprC};
 use futures::future::Future;
 use maidsafe_utilities::serialisation::deserialise;
-use routing::User::Key;
-use routing::XorName;
 use safe_core::client::Client;
 use safe_core::ipc::req::{containers_from_repr_c, containers_into_vec, ContainerPermissions};
 use safe_core::ipc::resp::{AccessContainerEntry, AppAccess};
 use safe_core::ipc::{access_container_enc_key, AppExchangeInfo, IpcError};
 use safe_core::utils::symmetric_decrypt;
 use safe_core::FutureExt;
+use safe_nd::{MDataAddress, PublicKey, XorName};
 use std::collections::HashMap;
 
 /// Represents an application that is registered with the Authenticator.
@@ -106,7 +105,7 @@ pub fn list_revoked(client: &AuthClient) -> Box<AuthFuture<Vec<AppExchangeInfo>>
     config::list_apps(client)
         .map(move |(_, auth_cfg)| (c2.access_container(), auth_cfg))
         .and_then(move |(access_container, auth_cfg)| {
-            c3.list_mdata_entries(access_container.name, access_container.type_tag)
+            c3.list_seq_mdata_entries(access_container.name(), access_container.type_tag())
                 .map_err(From::from)
                 .map(move |entries| (access_container, entries, auth_cfg))
         })
@@ -123,7 +122,7 @@ pub fn list_revoked(client: &AuthClient) -> Box<AuthFuture<Vec<AppExchangeInfo>>
                 // been deleted (is empty), then it's revoked.
                 let revoked = entries
                     .get(&key)
-                    .map(|entry| entry.content.is_empty())
+                    .map(|entry| entry.data.is_empty())
                     .unwrap_or(true);
 
                 if revoked {
@@ -143,7 +142,7 @@ pub fn list_registered(client: &AuthClient) -> Box<AuthFuture<Vec<RegisteredApp>
     config::list_apps(client)
         .map(move |(_, auth_cfg)| (c2.access_container(), auth_cfg))
         .and_then(move |(access_container, auth_cfg)| {
-            c3.list_mdata_entries(access_container.name, access_container.type_tag)
+            c3.list_seq_mdata_entries(access_container.name(), access_container.type_tag())
                 .map_err(From::from)
                 .map(move |entries| (access_container, entries, auth_cfg))
         })
@@ -158,18 +157,18 @@ pub fn list_registered(client: &AuthClient) -> Box<AuthFuture<Vec<RegisteredApp>
 
                 // Empty entry means it has been deleted
                 let entry = match entries.get(&key) {
-                    Some(entry) if !entry.content.is_empty() => Some(entry),
+                    Some(entry) if !entry.data.is_empty() => Some(entry),
                     _ => None,
                 };
 
                 if let Some(entry) = entry {
-                    let plaintext = symmetric_decrypt(&entry.content, &app.keys.enc_key)?;
+                    let plaintext = symmetric_decrypt(&entry.data, &app.keys.enc_key)?;
                     let app_access = deserialise::<AccessContainerEntry>(&plaintext)?;
 
                     let mut containers = HashMap::new();
 
                     for (container_name, (_, permission_set)) in app_access {
-                        unwrap!(containers.insert(container_name, permission_set));
+                        let _ = containers.insert(container_name, permission_set);
                     }
 
                     let registered_app = RegisteredApp {
@@ -194,11 +193,14 @@ pub fn apps_accessing_mutable_data(
     let c2 = client.clone();
 
     client
-        .list_mdata_permissions(name, type_tag)
+        .list_mdata_permissions(MDataAddress::Seq {
+            name,
+            tag: type_tag,
+        })
         .map_err(AuthError::from)
         .join(config::list_apps(&c2).map(|(_, apps)| {
             apps.into_iter()
-                .map(|(_, app_info)| (app_info.keys.sign_pk, app_info.info))
+                .map(|(_, app_info)| (PublicKey::from(app_info.keys.bls_pk), app_info.info))
                 .collect::<HashMap<_, _>>()
         }))
         .and_then(move |(permissions, apps)| {
@@ -206,29 +208,27 @@ pub fn apps_accessing_mutable_data(
             // they're in the Revoked state) and create a new `AppAccess` struct object
             let mut app_access_vec: Vec<AppAccess> = Vec::new();
             for (user, perm_set) in permissions {
-                if let Key(public_key) = user {
-                    let app_access = match apps.get(&public_key) {
-                        Some(app_info) => AppAccess {
-                            sign_key: public_key,
+                let app_access = match apps.get(&user) {
+                    Some(app_info) => AppAccess {
+                        sign_key: user,
+                        permissions: perm_set,
+                        name: Some(app_info.name.clone()),
+                        app_id: Some(app_info.id.clone()),
+                    },
+                    None => {
+                        // If an app is listed in the MD permissions list, but is not
+                        // listed in the registered apps list in Authenticator, then set
+                        // the app_id and app_name fields to None, but provide
+                        // the public sign key and the list of permissions.
+                        AppAccess {
+                            sign_key: user,
                             permissions: perm_set,
-                            name: Some(app_info.name.clone()),
-                            app_id: Some(app_info.id.clone()),
-                        },
-                        None => {
-                            // If an app is listed in the MD permissions list, but is not
-                            // listed in the registered apps list in Authenticator, then set
-                            // the app_id and app_name fields to None, but provide
-                            // the public sign key and the list of permissions.
-                            AppAccess {
-                                sign_key: public_key,
-                                permissions: perm_set,
-                                name: None,
-                                app_id: None,
-                            }
+                            name: None,
+                            app_id: None,
                         }
-                    };
-                    app_access_vec.push(app_access);
-                }
+                    }
+                };
+                app_access_vec.push(app_access);
             }
             Ok(app_access_vec)
         })

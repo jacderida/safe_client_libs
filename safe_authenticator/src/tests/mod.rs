@@ -28,7 +28,8 @@ use crate::{app_container, run};
 use ffi_utils::test_utils::{call_1, call_vec, sender_as_user_data};
 use ffi_utils::{from_c_str, ErrorCode, ReprC, StringError};
 use futures::{future, Future};
-use safe_core::{app_container_name, mdata_info, Client};
+use safe_core::{app_container_name, mdata_info, AuthActions, Client};
+use safe_nd::PublicKey;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::mpsc;
@@ -44,11 +45,14 @@ mod mock_routing {
     use crate::std_dirs::{DEFAULT_PRIVATE_DIRS, DEFAULT_PUBLIC_DIRS};
     use crate::{test_utils, Authenticator};
     use futures::Future;
-    use routing::{ClientError, Request, Response, User};
     use safe_core::ipc::AuthReq;
     use safe_core::nfs::NfsError;
     use safe_core::utils::generate_random_string;
-    use safe_core::{app_container_name, Client, CoreError, MockRouting};
+    use safe_core::{
+        app_container_name, test_create_balance, Client, ConnectionManager, CoreError,
+    };
+    use safe_nd::{Coins, Error as SndError, PublicKey, Request, RequestType, Response};
+    use std::str::FromStr;
 
     // Test operation recovery for std dirs creation.
     // 1. Try to create a new user's account using `safe_authenticator::Authenticator::create_acc`
@@ -63,31 +67,28 @@ mod mock_routing {
     // 5. Check the access container entry in the user's config root - it must be accessible
     #[test]
     fn std_dirs_recovery() {
-        use safe_core::DIR_TAG;
-
         // Add a request hook to forbid root dir modification. In this case
         // account creation operation will be failed, but login still should
         // be possible afterwards.
         let locator = unwrap!(generate_random_string(10));
         let password = unwrap!(generate_random_string(10));
-        let invitation = unwrap!(generate_random_string(10));
+        let balance_sk = threshold_crypto::SecretKey::random();
+        unwrap!(test_create_balance(
+            &balance_sk,
+            unwrap!(Coins::from_str("10"))
+        ));
 
         {
-            let routing_hook = move |mut routing: MockRouting| -> MockRouting {
+            let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
                 let mut put_mdata_counter = 0;
 
-                routing.set_request_hook(move |req| {
-                    match *req {
-                        Request::PutMData {
-                            ref data, msg_id, ..
-                        } if data.tag() == DIR_TAG => {
+                cm.set_request_hook(move |req| {
+                    match req {
+                        Request::PutMData(data) if data.tag() == safe_core::DIR_TAG => {
                             put_mdata_counter += 1;
 
                             if put_mdata_counter > 4 {
-                                Some(Response::PutMData {
-                                    msg_id,
-                                    res: Err(ClientError::LowBalance),
-                                })
+                                Some(Response::Mutation(Err(SndError::InsufficientBalance)))
                             } else {
                                 None
                             }
@@ -96,15 +97,15 @@ mod mock_routing {
                         _ => None,
                     }
                 });
-                routing
+                cm
             };
 
             let authenticator = Authenticator::create_acc_with_hook(
                 locator.clone(),
                 password.clone(),
-                invitation,
+                balance_sk,
                 || (),
-                routing_hook,
+                cm_hook,
             );
 
             // This operation should fail
@@ -141,56 +142,20 @@ mod mock_routing {
     #[test]
     fn login_with_low_balance() {
         // Register a hook prohibiting mutations and login
-        let routing_hook = move |mut routing: MockRouting| -> MockRouting {
-            routing.set_request_hook(move |req| {
-                match *req {
-                    Request::PutIData { msg_id, .. } => Some(Response::PutIData {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
-                    Request::PutMData { msg_id, .. } => Some(Response::PutMData {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
-                    Request::MutateMDataEntries { msg_id, .. } => {
-                        Some(Response::MutateMDataEntries {
-                            res: Err(ClientError::LowBalance),
-                            msg_id,
-                        })
-                    }
-                    Request::SetMDataUserPermissions { msg_id, .. } => {
-                        Some(Response::SetMDataUserPermissions {
-                            res: Err(ClientError::LowBalance),
-                            msg_id,
-                        })
-                    }
-                    Request::DelMDataUserPermissions { msg_id, .. } => {
-                        Some(Response::DelMDataUserPermissions {
-                            res: Err(ClientError::LowBalance),
-                            msg_id,
-                        })
-                    }
-                    Request::ChangeMDataOwner { msg_id, .. } => Some(Response::ChangeMDataOwner {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
-                    Request::InsAuthKey { msg_id, .. } => Some(Response::InsAuthKey {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
-                    Request::DelAuthKey { msg_id, .. } => Some(Response::DelAuthKey {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
+        let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
+            cm.set_request_hook(move |req| {
+                if req.get_type() == RequestType::Mutation {
+                    Some(Response::Mutation(Err(SndError::InsufficientBalance)))
+                } else {
                     // Pass-through
-                    _ => None,
+                    None
                 }
             });
-            routing
+            cm
         };
 
         // Make sure we can log in
-        let _authenticator = test_utils::create_account_and_login_with_hook(routing_hook);
+        let _authenticator = test_utils::create_account_and_login_with_hook(cm_hook);
     }
 
     // Test operation recovery for app authentication.
@@ -224,36 +189,40 @@ mod mock_routing {
     fn app_authentication_recovery() {
         let locator = unwrap!(generate_random_string(10));
         let password = unwrap!(generate_random_string(10));
-        let invitation = unwrap!(generate_random_string(10));
+        let balance_sk = threshold_crypto::SecretKey::random();
+        unwrap!(test_create_balance(
+            &balance_sk,
+            unwrap!(Coins::from_str("10"))
+        ));
 
-        let routing_hook = move |mut routing: MockRouting| -> MockRouting {
-            routing.set_request_hook(move |req| {
+        let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
+            cm.set_request_hook(move |req| {
                 match *req {
                     // Simulate a network failure after
                     // the `mutate_mdata_entries` operation (relating to
                     // the addition of the app to the user's config dir)
-                    Request::InsAuthKey { msg_id, .. } => Some(Response::InsAuthKey {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
+                    Request::InsAuthKey { .. } => {
+                        Some(Response::Mutation(Err(SndError::InsufficientBalance)))
+                    }
                     // Pass-through
                     _ => None,
                 }
             });
-            routing
+            cm
         };
         let auth = unwrap!(Authenticator::create_acc_with_hook(
             locator.clone(),
             password.clone(),
-            invitation,
+            balance_sk,
             || (),
-            routing_hook,
+            cm_hook,
         ));
 
         // Create a test app and try to authenticate it (with `app_container` set to true).
         let auth_req = AuthReq {
             app: test_utils::rand_app(),
             app_container: true,
+            app_permissions: Default::default(),
             containers: utils::create_containers_req(),
         };
         let app_id = auth_req.app.id.clone();
@@ -262,25 +231,22 @@ mod mock_routing {
         // `Revoked` state (as it is listed in the config root, but not in the access
         // container)
         match test_utils::register_app(&auth, &auth_req) {
-            Err(AuthError::CoreError(CoreError::RoutingClientError(ClientError::LowBalance))) => (),
+            Err(AuthError::CoreError(CoreError::DataError(SndError::InsufficientBalance))) => (),
             x => panic!("Unexpected {:?}", x),
         }
 
         // Simulate a network failure for the `update_container_perms` step -
         // it should fail at the second container (`_videos`)
-        let routing_hook = move |mut routing: MockRouting| -> MockRouting {
+        let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
             let mut reqs_counter = 0;
 
-            routing.set_request_hook(move |req| {
+            cm.set_request_hook(move |req| {
                 match *req {
-                    Request::SetMDataUserPermissions { msg_id, .. } => {
+                    Request::SetMDataUserPermissions { .. } => {
                         reqs_counter += 1;
 
                         if reqs_counter == 2 {
-                            Some(Response::SetMDataUserPermissions {
-                                res: Err(ClientError::LowBalance),
-                                msg_id,
-                            })
+                            Some(Response::Mutation(Err(SndError::InsufficientBalance)))
                         } else {
                             None
                         }
@@ -289,74 +255,71 @@ mod mock_routing {
                     _ => None,
                 }
             });
-            routing
+            cm
         };
         let auth = unwrap!(Authenticator::login_with_hook(
             locator.clone(),
             password.clone(),
             || (),
-            routing_hook,
+            cm_hook,
         ));
         match test_utils::register_app(&auth, &auth_req) {
-            Err(AuthError::CoreError(CoreError::RoutingClientError(ClientError::LowBalance))) => (),
+            Err(AuthError::CoreError(CoreError::DataError(SndError::InsufficientBalance))) => (),
             x => panic!("Unexpected {:?}", x),
         }
 
         // Simulate a network failure for the `app_container` setup step -
         // it should fail at the third request for `SetMDataPermissions` (after
         // setting permissions for 2 requested containers, `_video` and `_documents`)
-        let routing_hook = move |mut routing: MockRouting| -> MockRouting {
-            routing.set_request_hook(move |req| {
+        let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
+            cm.set_request_hook(move |req| {
                 match *req {
-                    Request::PutMData { msg_id, .. } => Some(Response::PutMData {
-                        res: Err(ClientError::LowBalance),
-                        msg_id,
-                    }),
+                    Request::PutMData { .. } => {
+                        Some(Response::Mutation(Err(SndError::InsufficientBalance)))
+                    }
+
                     // Pass-through
                     _ => None,
                 }
             });
-            routing
+            cm
         };
         let auth = unwrap!(Authenticator::login_with_hook(
             locator.clone(),
             password.clone(),
             || (),
-            routing_hook,
+            cm_hook,
         ));
         match test_utils::register_app(&auth, &auth_req) {
-            Err(AuthError::NfsError(NfsError::CoreError(CoreError::RoutingClientError(
-                ClientError::LowBalance,
+            Err(AuthError::NfsError(NfsError::CoreError(CoreError::DataError(
+                SndError::InsufficientBalance,
             )))) => (),
             x => panic!("Unexpected {:?}", x),
         }
 
         // Simulate a network failure for the `MutateMDataEntries` request, which
         // is supposed to setup the access container entry for the app
-        let routing_hook = move |mut routing: MockRouting| -> MockRouting {
-            routing.set_request_hook(move |req| {
+        let cm_hook = move |mut cm: ConnectionManager| -> ConnectionManager {
+            cm.set_request_hook(move |req| {
                 match *req {
-                    Request::MutateMDataEntries { msg_id, .. } => {
-                        // None
-                        Some(Response::SetMDataUserPermissions {
-                            res: Err(ClientError::LowBalance),
-                            msg_id,
-                        })
+                    Request::MutateMDataEntries { .. } => {
+                        Some(Response::Mutation(Err(SndError::InsufficientBalance)))
                     }
+
                     // Pass-through
                     _ => None,
                 }
             });
-            routing
+            cm
         };
         let auth = unwrap!(Authenticator::login_with_hook(
             locator.clone(),
             password.clone(),
             || (),
-            routing_hook,
+            cm_hook,
         ));
         match test_utils::register_app(&auth, &auth_req) {
-            Err(AuthError::CoreError(CoreError::RoutingClientError(ClientError::LowBalance))) => (),
+            Err(AuthError::CoreError(CoreError::DataError(SndError::InsufficientBalance))) => (),
             x => panic!("Unexpected {:?}", x),
         }
 
@@ -378,25 +341,25 @@ mod mock_routing {
             test_utils::access_container(&auth, app_id.clone(), auth_granted.clone());
         let (_videos_md, _) = unwrap!(ac_entries.remove("_videos"));
         let (_documents_md, _) = unwrap!(ac_entries.remove("_documents"));
-        let (app_container_md, _) = unwrap!(ac_entries.remove(&app_container_name(&app_id)));
+        let (app_container, _) = unwrap!(ac_entries.remove(&app_container_name(&app_id)));
 
-        let app_pk = auth_granted.app_keys.sign_pk;
+        let app_pk = PublicKey::from(auth_granted.app_keys.bls_pk);
 
         unwrap!(run(&auth, move |client| {
             let c2 = client.clone();
 
             client
-                .get_mdata_version(app_container_md.name, app_container_md.type_tag)
+                .get_mdata_version(*app_container.address())
                 .then(move |res| {
                     let version = unwrap!(res);
                     assert_eq!(version, 0);
 
                     // Check that the app's container has required permissions.
-                    c2.list_mdata_permissions(app_container_md.name, app_container_md.type_tag)
+                    c2.list_mdata_permissions(*app_container.address())
                 })
                 .then(move |res| {
                     let perms = unwrap!(res);
-                    assert!(perms.contains_key(&User::Key(app_pk)));
+                    assert!(perms.contains_key(&app_pk));
                     assert_eq!(perms.len(), 1);
 
                     Ok(())
@@ -429,8 +392,8 @@ fn test_access_container() {
         let fs: Vec<_> = entries
             .into_iter()
             .map(|(_, dir)| {
-                let f1 = client.list_mdata_entries(dir.name, dir.type_tag);
-                let f2 = client.list_mdata_permissions(dir.name, dir.type_tag);
+                let f1 = client.list_seq_mdata_entries(dir.name(), dir.type_tag());
+                let f2 = client.list_mdata_permissions(*dir.address());
 
                 f1.join(f2).map_err(AuthError::from)
             })
@@ -456,7 +419,7 @@ fn config_root_dir() {
     let (dir, entries) = unwrap!(run(&authenticator, |client| {
         let dir = client.config_root_dir();
         client
-            .list_mdata_entries(dir.name, dir.type_tag)
+            .list_seq_mdata_entries(dir.name(), dir.type_tag())
             .map(move |entries| (dir, entries))
             .map_err(AuthError::from)
     }));
@@ -465,7 +428,7 @@ fn config_root_dir() {
 
     // Verify it contains the required entries.
     let config = unwrap!(entries.get(KEY_APPS));
-    assert!(config.content.is_empty());
+    assert!(config.data.is_empty());
 }
 
 // Test app authentication.
@@ -492,6 +455,7 @@ fn app_authentication() {
     let auth_req = AuthReq {
         app: app_exchange_info.clone(),
         app_container: true,
+        app_permissions: Default::default(),
         containers,
     };
 
@@ -564,7 +528,7 @@ fn app_authentication() {
     assert_eq!(access_container.len(), 3);
 
     let app_keys = auth_granted.app_keys;
-    let app_sign_pk = app_keys.sign_pk;
+    let app_sign_pk = PublicKey::from(app_keys.bls_pk);
 
     test_utils::compare_access_container_entries(
         &authenticator,
@@ -604,7 +568,7 @@ fn app_authentication() {
             .map_err(AuthError::from)
     }));
 
-    assert!(auth_keys.contains(&app_sign_pk));
+    assert!(auth_keys.contains_key(&app_sign_pk));
 }
 
 // Try to authenticate with invalid container names.
@@ -630,6 +594,7 @@ fn invalid_container_authentication() {
     let auth_req = AuthReq {
         app: app_exchange_info.clone(),
         app_container: true,
+        app_permissions: Default::default(),
         containers,
     };
 
@@ -667,6 +632,7 @@ fn unregistered_authentication() {
         req: IpcReq::Auth(AuthReq {
             app: test_utils::rand_app(),
             app_container: true,
+            app_permissions: Default::default(),
             containers: utils::create_containers_req(),
         }),
     };
@@ -754,6 +720,7 @@ fn authenticated_app_can_be_authenticated_again() {
     let auth_req = AuthReq {
         app: test_utils::rand_app(),
         app_container: false,
+        app_permissions: Default::default(),
         containers: Default::default(),
     };
 
@@ -860,6 +827,7 @@ fn containers_access_request() {
     let auth_req = AuthReq {
         app: test_utils::rand_app(),
         app_container: true,
+        app_permissions: Default::default(),
         containers: utils::create_containers_req(),
     };
     let app_id = auth_req.app.id.clone();
@@ -908,7 +876,7 @@ fn containers_access_request() {
     let mut expected = utils::create_containers_req();
     let _ = expected.insert("_downloads".to_owned(), btree_set![Permission::Update]);
 
-    let app_sign_pk = auth_granted.app_keys.sign_pk;
+    let app_sign_pk = PublicKey::from(auth_granted.app_keys.bls_pk);
     let access_container = test_utils::access_container(&authenticator, app_id, auth_granted);
     test_utils::compare_access_container_entries(
         &authenticator,
@@ -966,12 +934,14 @@ fn lists_of_registered_and_revoked_apps() {
     let auth_req1 = AuthReq {
         app: test_utils::rand_app(),
         app_container: false,
+        app_permissions: Default::default(),
         containers: Default::default(),
     };
 
     let auth_req2 = AuthReq {
         app: test_utils::rand_app(),
         app_container: false,
+        app_permissions: Default::default(),
         containers: Default::default(),
     };
 

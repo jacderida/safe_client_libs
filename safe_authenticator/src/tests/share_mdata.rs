@@ -14,13 +14,11 @@ use crate::test_utils::{self, Payload};
 use ffi_utils::test_utils::{call_1, call_vec};
 use futures::Future;
 use maidsafe_utilities::serialisation::serialise;
-use rand;
-use routing::{Action, MutableData, PermissionSet, User, Value};
-use rust_sodium::crypto::sign;
 use safe_core::ipc::req::AppExchangeInfo;
 use safe_core::ipc::resp::{AppAccess, UserMetadata, METADATA_KEY};
 use safe_core::ipc::{self, AuthReq, IpcError, IpcMsg, IpcReq, IpcResp, ShareMData, ShareMDataReq};
 use safe_core::Client;
+use safe_nd::{MDataAction, MDataPermissionSet, MDataSeqValue, PublicKey, SeqMutableData};
 use std::collections::BTreeMap;
 
 // Test making an empty request to share mutable data.
@@ -62,7 +60,7 @@ fn share_some_mdatas() {
     let authenticator = test_utils::create_account_and_login();
 
     let user = unwrap!(run(&authenticator, move |client| {
-        ok!(unwrap!(client.public_signing_key()))
+        ok!(client.public_key())
     }));
 
     const NUM_MDATAS: usize = 3;
@@ -71,27 +69,22 @@ fn share_some_mdatas() {
     let mut metadatas = Vec::new();
 
     for _ in 0..NUM_MDATAS {
-        let name = rand::random();
+        let name = new_rand::random();
         let tag = 0;
         let mdata = {
-            let owners = btree_set![user];
-            unwrap!(MutableData::new(
-                name,
-                tag,
-                btree_map![],
-                btree_map![],
-                owners,
-            ))
+            SeqMutableData::new_with_data(name, tag, Default::default(), Default::default(), user)
         };
 
         unwrap!(run(&authenticator, move |client| {
-            client.put_mdata(mdata).map_err(AuthError::CoreError)
+            client
+                .put_seq_mutable_data(mdata)
+                .map_err(AuthError::CoreError)
         }));
 
         mdatas.push(ShareMData {
             type_tag: tag,
             name,
-            perms: PermissionSet::new().allow(Action::Insert),
+            perms: MDataPermissionSet::new().allow(MDataAction::Insert),
         });
         metadatas.push((None, name, tag));
     }
@@ -127,19 +120,21 @@ fn share_some_mdatas() {
 // Test making a request to share invalid mutable data.
 #[test]
 fn share_invalid_mdatas() {
+    test_utils::init_log();
+
     let authenticator = test_utils::create_account_and_login();
 
     const NUM_MDATAS: usize = 3;
     let mut share_mdatas = Vec::new();
 
     for _ in 0..NUM_MDATAS {
-        let name = rand::random();
+        let name = new_rand::random();
         let tag = 15_000;
 
         share_mdatas.push(ShareMData {
             type_tag: tag,
             name,
-            perms: PermissionSet::new().allow(Action::Insert),
+            perms: MDataPermissionSet::new().allow(MDataAction::Insert),
         });
     }
 
@@ -167,19 +162,20 @@ fn share_some_mdatas_with_valid_metadata() {
     let auth_req = AuthReq {
         app: app_id.clone(),
         app_container: false,
+        app_permissions: Default::default(),
         containers: Default::default(),
     };
 
     let app_auth = unwrap!(test_utils::register_app(&authenticator, &auth_req));
-    let app_key = app_auth.app_keys.sign_pk;
+    let app_key = PublicKey::from(app_auth.app_keys.bls_pk);
 
     let user = unwrap!(run(&authenticator, move |client| {
-        ok!(unwrap!(client.public_signing_key()))
+        ok!(client.public_key())
     }));
 
     const NUM_MDATAS: usize = 3;
 
-    let perms = PermissionSet::new().allow(Action::Insert);
+    let perms = MDataPermissionSet::new().allow(MDataAction::Insert);
     let mut mdatas = Vec::new();
     let mut metadatas = Vec::new();
     for i in 0..NUM_MDATAS {
@@ -188,32 +184,27 @@ fn share_some_mdatas_with_valid_metadata() {
             description: Some(format!("description {}", i)),
         };
 
-        let name = rand::random();
+        let name = new_rand::random();
         let tag = 10_000;
         let mdata = {
-            let value = Value {
-                content: unwrap!(serialise(&metadata)),
-                entry_version: 0,
+            let value = MDataSeqValue {
+                data: unwrap!(serialise(&metadata)),
+                version: 0,
             };
-            let owners = btree_set![user];
             let entries = btree_map![METADATA_KEY.to_vec() => value];
-            unwrap!(MutableData::new(
-                name,
-                tag,
-                BTreeMap::new(),
-                entries,
-                owners,
-            ))
+            SeqMutableData::new_with_data(name, tag, entries, BTreeMap::new(), user)
         };
 
         unwrap!(run(&authenticator, move |client| {
-            client.put_mdata(mdata).map_err(AuthError::CoreError)
+            client
+                .put_seq_mutable_data(mdata)
+                .map_err(AuthError::CoreError)
         }));
 
         mdatas.push(ShareMData {
             type_tag: tag,
             name,
-            perms,
+            perms: perms.clone(),
         });
         metadatas.push((Some(metadata), name, tag));
     }
@@ -265,60 +256,43 @@ fn share_some_mdatas_with_valid_metadata() {
         let type_tag = share_mdata.type_tag;
         let mdata = unwrap!(run(&authenticator, move |client| {
             client
-                .get_mdata(name, type_tag)
+                .get_seq_mdata(name, type_tag)
                 .map_err(AuthError::CoreError)
         }));
-        let permissions = unwrap!(mdata.user_permissions(&User::Key(app_key)));
+        let permissions = unwrap!(mdata.user_permissions(app_key));
         assert_eq!(permissions, &perms);
     }
 }
 
 // Test making a request to share mdata with invalid owners.
+// FIXME: Fix this test when we implement multiple owners
 #[test]
 fn share_some_mdatas_with_ownership_error() {
     let authenticator = test_utils::create_account_and_login();
 
     let user = unwrap!(run(&authenticator, move |client| {
-        ok!(unwrap!(client.public_signing_key()))
+        ok!(client.public_key())
     }));
 
-    let (someone_else, _) = sign::gen_keypair();
+    let name = new_rand::random();
+    let mdata = SeqMutableData::new_with_data(name, 0, btree_map![], btree_map![], user);
 
-    let ownerss = vec![
-        btree_set![user /* , someone_else */], // currently can't handle having multiple owners
-        btree_set![someone_else],
-        btree_set![user],
-        btree_set![],
-    ];
+    unwrap!(run(&authenticator, move |client| {
+        client
+            .put_seq_mutable_data(mdata)
+            .map_err(AuthError::CoreError)
+    }));
 
-    let mut mdatas = Vec::new();
-    for owners in ownerss {
-        let name = rand::random();
-        let mdata = {
-            unwrap!(MutableData::new(
-                name,
-                0,
-                btree_map![],
-                btree_map![],
-                owners,
-            ))
-        };
-
-        unwrap!(run(&authenticator, move |client| {
-            client.put_mdata(mdata).map_err(AuthError::CoreError)
-        }));
-
-        mdatas.push(ShareMData {
-            type_tag: 0,
-            name,
-            perms: PermissionSet::new().allow(Action::Insert),
-        });
-    }
+    let share_md = ShareMData {
+        type_tag: 0,
+        name,
+        perms: MDataPermissionSet::new().allow(MDataAction::Insert),
+    };
 
     let req_id = ipc::gen_req_id();
     let req = ShareMDataReq {
         app: test_utils::rand_app(),
-        mdata: mdatas.clone(),
+        mdata: vec![share_md.clone()],
     };
     let msg = IpcMsg::Req {
         req_id,
@@ -372,20 +346,21 @@ fn share_some_mdatas_with_ownership_error() {
 // and the list of permissions are correct.
 #[test]
 fn auth_apps_accessing_mdatas() {
+    test_utils::init_log();
     let authenticator = test_utils::create_account_and_login();
 
     let user = unwrap!(run(&authenticator, move |client| {
-        ok!(unwrap!(client.public_signing_key()))
+        ok!(client.public_key())
     }));
 
     const NUM_MDATAS: usize = 3;
     const NUM_MDATAS_NO_META: usize = 3;
 
     // Create a few MData objects with metadata
-    let perms = PermissionSet::new().allow(Action::Insert);
+    let perms = MDataPermissionSet::new().allow(MDataAction::Insert);
     let mut mdatas = Vec::new();
     let mut metadatas = Vec::new();
-    let unregistered = sign::gen_keypair().0;
+    let unregistered = PublicKey::from(threshold_crypto::SecretKey::random().public_key());
 
     for i in 0..(NUM_MDATAS + NUM_MDATAS_NO_META) {
         let metadata = if i < NUM_MDATAS {
@@ -397,17 +372,17 @@ fn auth_apps_accessing_mdatas() {
             None
         };
 
-        let name = rand::random();
+        let name = new_rand::random();
         let tag = 10_000 + i as u64;
         let mdata = {
-            let owners = btree_set![user];
+            let owners = user;
 
             // We need to test both with and without metadata
             let entries = match metadata {
                 Some(ref meta) => {
-                    let value = Value {
-                        content: unwrap!(serialise(&meta)),
-                        entry_version: 0,
+                    let value = MDataSeqValue {
+                        data: unwrap!(serialise(&meta)),
+                        version: 0,
                     };
                     btree_map![METADATA_KEY.to_vec() => value]
                 }
@@ -415,41 +390,44 @@ fn auth_apps_accessing_mdatas() {
             };
 
             // Include one app in the permissions list that is not registered
-            unwrap!(MutableData::new(
+            SeqMutableData::new_with_data(
                 name,
                 tag,
-                btree_map![User::Key(unregistered) => perms],
                 entries,
+                btree_map![unregistered => perms.clone()],
                 owners,
-            ))
+            )
         };
 
         unwrap!(run(&authenticator, move |client| {
-            client.put_mdata(mdata).map_err(AuthError::CoreError)
+            client
+                .put_seq_mutable_data(mdata)
+                .map_err(AuthError::CoreError)
         }));
 
         mdatas.push(ShareMData {
             type_tag: tag,
             name,
-            perms,
+            perms: perms.clone(),
         });
         metadatas.push((metadata, name, tag));
     }
 
     const NUM_APPS: usize = 3;
 
-    let mut apps: Vec<(sign::PublicKey, AppExchangeInfo)> = Vec::with_capacity(NUM_APPS);
+    let mut apps: Vec<(PublicKey, AppExchangeInfo)> = Vec::with_capacity(NUM_APPS);
     for _ in 0..NUM_APPS {
         // Create an app and register it.
         let app_id = test_utils::rand_app();
         let auth_req = AuthReq {
             app: app_id.clone(),
             app_container: false,
+            app_permissions: Default::default(),
             containers: Default::default(),
         };
 
         let app_auth = unwrap!(test_utils::register_app(&authenticator, &auth_req));
-        let app_key = app_auth.app_keys.sign_pk;
+        let app_key = PublicKey::from(app_auth.app_keys.bls_pk);
 
         // Share the Mdatas with the app.
         let req_id = ipc::gen_req_id();

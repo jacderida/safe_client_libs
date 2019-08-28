@@ -31,10 +31,6 @@
 )]
 #![deny(
     bad_style,
-    clippy::all,
-    clippy::option_unwrap_used,
-    clippy::unicode_not_nfc,
-    clippy::wrong_pub_self_convention,
     deprecated,
     improper_ctypes,
     missing_docs,
@@ -51,7 +47,11 @@
     unused_comparisons,
     unused_features,
     unused_parens,
-    while_true
+    while_true,
+    clippy::all,
+    clippy::option_unwrap_used,
+    clippy::unicode_not_nfc,
+    clippy::wrong_pub_self_convention
 )]
 #![warn(
     trivial_casts,
@@ -63,9 +63,6 @@
 )]
 #![allow(
     box_pointers,
-    clippy::implicit_hasher,
-    clippy::too_many_arguments,
-    clippy::use_debug,
     missing_copy_implementations,
     missing_debug_implementations,
     variant_size_differences
@@ -76,10 +73,6 @@
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
-#[cfg(test)]
-extern crate serde_json;
 #[macro_use]
 extern crate unwrap;
 
@@ -112,14 +105,20 @@ pub mod nfs;
 /// Implements the Self Encryption storage trait.
 pub mod self_encryption_storage;
 
+#[cfg(not(feature = "mock-network"))]
+mod connection_manager;
 mod errors;
 mod event;
 
-pub use self::client::{mdata_info, recovery, Client, ClientKeys, MDataInfo};
+pub use self::client::{
+    mdata_info, recovery, test_create_balance, AuthActions, Client, ClientKeys, MDataInfo,
+};
 #[cfg(feature = "mock-network")]
-pub use self::client::{mock_vault_path, MockRouting};
+pub use self::client::{mock_vault_path, MockConnectionManager as ConnectionManager};
+#[cfg(not(feature = "mock-network"))]
+pub use self::connection_manager::ConnectionManager;
 pub use self::errors::CoreError;
-pub use self::event::{CoreEvent, NetworkEvent, NetworkRx, NetworkTx};
+pub use self::event::{NetworkEvent, NetworkRx, NetworkTx};
 pub use self::event_loop::{CoreFuture, CoreMsg, CoreMsgRx, CoreMsgTx};
 pub use self::self_encryption_storage::{SelfEncryptionStorage, SelfEncryptionStorageError};
 pub use self::utils::FutureExt;

@@ -12,7 +12,7 @@ use safe_app::ffi::app_registered;
 use safe_app::ffi::ipc::*;
 use safe_app::ffi::mdata_info::mdata_info_random_public;
 use safe_app::ffi::mutable_data::entries::{
-    mdata_entries_insert, mdata_entries_new, mdata_list_entries,
+    seq_mdata_entries_insert, seq_mdata_entries_new, seq_mdata_list_entries,
 };
 use safe_app::ffi::mutable_data::entry_actions::{
     mdata_entry_actions_delete, mdata_entry_actions_insert, mdata_entry_actions_new,
@@ -22,13 +22,15 @@ use safe_app::ffi::mutable_data::permissions::{
     mdata_permissions_insert, mdata_permissions_new, USER_ANYONE,
 };
 use safe_app::ffi::mutable_data::{mdata_entries, mdata_mutate_entries, mdata_put};
-use safe_app::{Action, App, PermissionSet};
+use safe_app::App;
 use safe_authenticator::ffi::apps::*;
 use safe_authenticator::ffi::ipc::*;
 use safe_authenticator::ffi::*;
 use safe_authenticator::test_utils::*;
 use safe_authenticator::{AuthError, Authenticator};
+use safe_core::btree_set;
 use safe_core::ffi::ipc::resp::AuthGranted as FfiAuthGranted;
+use safe_core::ffi::MDataKind;
 use safe_core::ipc::req::{
     permission_set_into_repr_c, AppExchangeInfo, AuthReq, ContainerPermissions,
 };
@@ -37,6 +39,8 @@ use safe_core::ipc::{AuthGranted, Permission};
 use safe_core::nfs::{Mode, NfsError};
 use safe_core::MDataInfo;
 use safe_core::{utils, CoreError};
+use safe_nd::{AppPermissions, MDataAction, MDataPermissionSet};
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
 use std::env;
@@ -45,6 +49,7 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
 use std::os::raw::c_void;
+use unwrap::unwrap;
 
 static READ_WRITE_APP_ID: &str = "0123456789";
 static READ_WRITE_FILE_NAME: &str = "test.mp4";
@@ -189,6 +194,7 @@ fn write_data() {
                     videos_md.clone(),
                     file_name,
                     vec![1; 10],
+                    true,
                 ));
             }
         }
@@ -287,18 +293,24 @@ fn mdata_operations() {
     println!("Creating random mdata...");
 
     let type_tag = 15_000;
-    let mdata_info: MDataInfo =
-        unsafe { unwrap!(call_1(|ud, cb| mdata_info_random_public(type_tag, ud, cb))) };
+    let mdata_info: MDataInfo = unsafe {
+        unwrap!(call_1(|ud, cb| mdata_info_random_public(
+            MDataKind::Unseq,
+            type_tag,
+            ud,
+            cb
+        )))
+    };
     let mdata_info = mdata_info.into_repr_c();
 
     // Create permissions for anyone
     let perms_h = unsafe { unwrap!(call_1(|ud, cb| mdata_permissions_new(app, ud, cb))) };
     {
         // Create a permissions set
-        let perms_set = PermissionSet::new()
-            .allow(Action::Insert)
-            .allow(Action::Update)
-            .allow(Action::Delete);
+        let perms_set = MDataPermissionSet::new()
+            .allow(MDataAction::Insert)
+            .allow(MDataAction::Update)
+            .allow(MDataAction::Delete);
 
         unsafe {
             unwrap!(call_0(|ud, cb| mdata_permissions_insert(
@@ -312,7 +324,7 @@ fn mdata_operations() {
         };
     }
 
-    let entries_h = unsafe { unwrap!(call_1(|ud, cb| mdata_entries_new(app, ud, cb))) };
+    let entries_h = unsafe { unwrap!(call_1(|ud, cb| seq_mdata_entries_new(app, ud, cb))) };
 
     let key0 = b"random_key_1".to_vec();
     let value0 = b"Scotland to try Scotch whisky".to_vec();
@@ -323,7 +335,7 @@ fn mdata_operations() {
     let value2 = b"Cyprus for falafels and kebab".to_vec();
 
     unsafe {
-        unwrap!(call_0(|ud, cb| mdata_entries_insert(
+        unwrap!(call_0(|ud, cb| seq_mdata_entries_insert(
             app,
             entries_h,
             key0.as_ptr(),
@@ -333,7 +345,7 @@ fn mdata_operations() {
             ud,
             cb
         )));
-        unwrap!(call_0(|ud, cb| mdata_entries_insert(
+        unwrap!(call_0(|ud, cb| seq_mdata_entries_insert(
             app,
             entries_h,
             key1.as_ptr(),
@@ -360,7 +372,7 @@ fn mdata_operations() {
     println!("Getting the list of mdata entries...");
 
     let entries: Vec<MDataEntry> = unsafe {
-        unwrap!(call_vec(|ud, cb| mdata_list_entries(
+        unwrap!(call_vec(|ud, cb| seq_mdata_list_entries(
             app, entries_h, ud, cb
         )))
     };
@@ -437,7 +449,7 @@ fn mdata_operations() {
     let entries_h = unsafe { unwrap!(call_1(|ud, cb| mdata_entries(app, &mdata_info, ud, cb))) };
 
     let entries: Vec<MDataEntry> = unsafe {
-        unwrap!(call_vec(|ud, cb| mdata_list_entries(
+        unwrap!(call_vec(|ud, cb| seq_mdata_list_entries(
             app, entries_h, ud, cb
         )))
     };
@@ -523,6 +535,7 @@ fn authorisation_and_revocation() {
             videos_md.clone(),
             file_name.as_str(),
             vec![1; 10],
+            true,
         ));
         videos_md
     };
@@ -620,6 +633,9 @@ fn ffi_authorise_app(auth_h: *mut Authenticator, app_info: &AppExchangeInfo) -> 
     let auth_req = AuthReq {
         app: app_info.clone(),
         app_container: false,
+        app_permissions: AppPermissions {
+            transfer_coins: true,
+        },
         containers: create_containers_req(),
     };
     let ffi_auth_req = unwrap!(auth_req.clone().into_repr_c());
@@ -746,7 +762,7 @@ impl ReprC for RegisteredAppId {
     type Error = StringError;
 
     unsafe fn clone_from_repr_c(repr_c: Self::C) -> Result<Self, Self::Error> {
-        Ok(RegisteredAppId(from_c_str((*repr_c).app_info.id)?))
+        Ok(Self(from_c_str((*repr_c).app_info.id)?))
     }
 }
 

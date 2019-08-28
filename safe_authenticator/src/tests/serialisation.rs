@@ -21,10 +21,12 @@ use safe_core::config_handler;
 use safe_core::ipc::req::ContainerPermissions;
 use safe_core::ipc::{AccessContainerEntry, AppExchangeInfo, AuthReq, Permission};
 use safe_core::mock_vault_path;
-use safe_core::{Client, FutureExt, MDataInfo};
+use safe_core::{test_create_balance, Client, FutureExt, MDataInfo};
+use safe_nd::Coins;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[test]
 #[ignore]
@@ -39,7 +41,7 @@ fn serialisation_write_data() {
     let auth = unwrap!(Authenticator::create_acc(
         stash.locator.clone(),
         stash.password.clone(),
-        stash.invitation.clone(),
+        stash.balance_sk.clone(),
         || (),
     ));
 
@@ -139,7 +141,7 @@ fn verify_std_dirs(
         .chain(DEFAULT_PRIVATE_DIRS.iter())
         .map(|expected_container| {
             let mi = unwrap!(actual_containers.get(*expected_container));
-            client.get_mdata_version(mi.name, mi.type_tag)
+            client.get_mdata_version(*mi.address())
         })
         .collect();
 
@@ -167,7 +169,7 @@ fn verify_access_container_entry(
 struct Stash {
     locator: String,
     password: String,
-    invitation: String,
+    balance_sk: threshold_crypto::SecretKey,
     auth_req1: AuthReq,
     auth_req0: AuthReq,
 }
@@ -199,6 +201,7 @@ fn setup() -> (Stash, PathBuf) {
 
         AuthReq {
             app: app_exchange_info,
+            app_permissions: Default::default(),
             app_container: false,
             containers: containers.clone(),
         }
@@ -215,14 +218,20 @@ fn setup() -> (Stash, PathBuf) {
         AuthReq {
             app: app_exchange_info,
             app_container: false,
+            app_permissions: Default::default(),
             containers: containers.clone(),
         }
     };
+    let balance_sk = threshold_crypto::SecretKey::random();
+    unwrap!(test_create_balance(
+        &balance_sk,
+        unwrap!(Coins::from_str("10"))
+    ));
 
     let stash = Stash {
         locator: random_string(&mut rng, 16),
         password: random_string(&mut rng, 16),
-        invitation: String::new(),
+        balance_sk,
         auth_req0,
         auth_req1,
     };

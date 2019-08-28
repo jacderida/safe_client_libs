@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -17,15 +17,15 @@ use ffi_utils::callback::Callback;
 use ffi_utils::{
     catch_unwind_cb, vec_clone_from_raw_parts, FfiResult, OpaqueCtx, SafePtr, FFI_RESULT_OK,
 };
-use routing::{ClientError, Value};
 use safe_core::ffi::ipc::resp::{MDataEntry, MDataKey, MDataValue};
 use safe_core::CoreError;
+use safe_nd::{Error, MDataSeqValue};
 use std::collections::BTreeMap;
 use std::os::raw::c_void;
 
 /// Create new empty entries.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_entries_new(
+pub unsafe extern "C" fn seq_mdata_entries_new(
     app: *const App,
     user_data: *mut c_void,
     o_cb: extern "C" fn(
@@ -38,14 +38,14 @@ pub unsafe extern "C" fn mdata_entries_new(
         send_sync(app, user_data, o_cb, |_, context| {
             Ok(context
                 .object_cache()
-                .insert_mdata_entries(Default::default()))
+                .insert_seq_mdata_entries(Default::default()))
         })
     })
 }
 
 /// Insert an entry to the entries.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_entries_insert(
+pub unsafe extern "C" fn seq_mdata_entries_insert(
     app: *const App,
     entries_h: MDataEntriesHandle,
     key: *const u8,
@@ -62,9 +62,9 @@ pub unsafe extern "C" fn mdata_entries_insert(
         with_entries(app, entries_h, user_data, o_cb, |entries| {
             let _ = entries.insert(
                 key,
-                Value {
-                    content: value,
-                    entry_version: 0,
+                MDataSeqValue {
+                    data: value,
+                    version: 0,
                 },
             );
 
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn mdata_entries_insert(
 
 /// Returns the number of entries.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_entries_len(
+pub unsafe extern "C" fn seq_mdata_entries_len(
     app: *const App,
     entries_h: MDataEntriesHandle,
     user_data: *mut c_void,
@@ -87,10 +87,9 @@ pub unsafe extern "C" fn mdata_entries_len(
 }
 
 /// Get the entry value at the given key.
-///
 /// The caller must NOT free the content pointer.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_entries_get(
+pub unsafe extern "C" fn seq_mdata_entries_get(
     app: *const App,
     entries_h: MDataEntriesHandle,
     key: *const u8,
@@ -110,14 +109,14 @@ pub unsafe extern "C" fn mdata_entries_get(
 
         (*app).send(move |_, context| {
             let entries = try_cb!(
-                context.object_cache().get_mdata_entries(entries_h),
+                context.object_cache().get_seq_mdata_entries(entries_h),
                 user_data,
                 o_cb
             );
 
             let value = entries
                 .get(&key)
-                .ok_or(ClientError::NoSuchEntry)
+                .ok_or(Error::NoSuchEntry)
                 .map_err(CoreError::from)
                 .map_err(AppError::from);
             let value = try_cb!(value, user_data, o_cb);
@@ -125,9 +124,9 @@ pub unsafe extern "C" fn mdata_entries_get(
             o_cb(
                 user_data.0,
                 FFI_RESULT_OK,
-                value.content.as_safe_ptr(),
-                value.content.len(),
-                value.entry_version,
+                value.data.as_safe_ptr(),
+                value.data.len(),
+                value.version,
             );
 
             None
@@ -137,7 +136,7 @@ pub unsafe extern "C" fn mdata_entries_get(
 
 /// Return a list of the entries.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_list_entries(
+pub unsafe extern "C" fn seq_mdata_list_entries(
     app: *const App,
     entries_h: MDataEntriesHandle,
     user_data: *mut c_void,
@@ -153,7 +152,7 @@ pub unsafe extern "C" fn mdata_list_entries(
     catch_unwind_cb(user_data, o_cb, || {
         (*app).send(move |_client, context| {
             let entries = try_cb!(
-                context.object_cache().get_mdata_entries(entries_h),
+                context.object_cache().get_seq_mdata_entries(entries_h),
                 user_data.0,
                 o_cb
             );
@@ -166,9 +165,9 @@ pub unsafe extern "C" fn mdata_list_entries(
                         key_len: key.len(),
                     },
                     value: MDataValue {
-                        content: value.content.as_safe_ptr(),
-                        content_len: value.content.len(),
-                        entry_version: value.entry_version,
+                        content: value.data.as_safe_ptr(),
+                        content_len: value.data.len(),
+                        entry_version: value.version,
                     },
                 })
                 .collect();
@@ -187,7 +186,7 @@ pub unsafe extern "C" fn mdata_list_entries(
 
 /// Free the entries from memory.
 #[no_mangle]
-pub unsafe extern "C" fn mdata_entries_free(
+pub unsafe extern "C" fn seq_mdata_entries_free(
     app: *const App,
     entries_h: MDataEntriesHandle,
     user_data: *mut c_void,
@@ -195,7 +194,7 @@ pub unsafe extern "C" fn mdata_entries_free(
 ) {
     catch_unwind_cb(user_data, o_cb, || {
         send_sync(app, user_data, o_cb, move |_, context| {
-            let _ = context.object_cache().remove_mdata_entries(entries_h)?;
+            let _ = context.object_cache().remove_seq_mdata_entries(entries_h)?;
             Ok(())
         })
     })
@@ -212,10 +211,10 @@ unsafe fn with_entries<C, F>(
 ) -> Result<(), AppError>
 where
     C: Callback + Copy + Send + 'static,
-    F: FnOnce(&mut BTreeMap<Vec<u8>, Value>) -> Result<C::Args, AppError> + Send + 'static,
+    F: FnOnce(&mut BTreeMap<Vec<u8>, MDataSeqValue>) -> Result<C::Args, AppError> + Send + 'static,
 {
     send_sync(app, user_data, o_cb, move |_, context| {
-        let mut entries = context.object_cache().get_mdata_entries(entries_h)?;
+        let mut entries = context.object_cache().get_seq_mdata_entries(entries_h)?;
         f(&mut *entries)
     })
 }
@@ -234,9 +233,10 @@ mod tests {
         call_0, call_1, call_vec, send_via_user_data, sender_as_user_data,
     };
     use ffi_utils::vec_clone_from_raw_parts;
-    use routing::{Action, PermissionSet, Value};
+    use safe_core::ffi::MDataKind;
     use safe_core::ipc::resp::{MDataEntry, MDataKey, MDataValue};
     use safe_core::utils;
+    use safe_nd::{MDataAction, MDataPermissionSet, MDataSeqValue};
     use std::os::raw::c_void;
     use std::sync::mpsc;
 
@@ -249,57 +249,63 @@ mod tests {
         let key0 = b"key0".to_vec();
         let key1 = b"key1".to_vec();
 
-        let value0 = Value {
-            content: unwrap!(utils::generate_random_vector(10)),
-            entry_version: 0,
+        let value0 = MDataSeqValue {
+            data: unwrap!(utils::generate_random_vector(10)),
+            version: 0,
         };
 
-        let value1 = Value {
-            content: unwrap!(utils::generate_random_vector(10)),
-            entry_version: 2,
+        let value1 = MDataSeqValue {
+            data: unwrap!(utils::generate_random_vector(10)),
+            version: 2,
         };
 
         let entries = btree_map![key0.clone() => value0.clone(),
                                  key1.clone() => value1.clone()];
 
         let handle0 = unwrap!(run(&app, move |_, context| {
-            Ok(context.object_cache().insert_mdata_entries(entries))
+            Ok(context.object_cache().insert_seq_mdata_entries(entries))
         }));
 
-        let len1: usize =
-            unsafe { unwrap!(call_1(|ud, cb| mdata_entries_len(&app, handle0, ud, cb))) };
+        let len1: usize = unsafe {
+            unwrap!(call_1(|ud, cb| seq_mdata_entries_len(
+                &app, handle0, ud, cb
+            )))
+        };
 
         let handle1 = unsafe {
-            let handle = unwrap!(call_1(|ud, cb| mdata_entries_new(&app, ud, cb)));
-            unwrap!(call_0(|ud, cb| mdata_entries_insert(
+            let handle = unwrap!(call_1(|ud, cb| seq_mdata_entries_new(&app, ud, cb)));
+            unwrap!(call_0(|ud, cb| seq_mdata_entries_insert(
                 &app,
                 handle,
                 key0.as_ptr(),
                 key0.len(),
-                value0.content.as_ptr(),
-                value0.content.len(),
+                value0.data.as_ptr(),
+                value0.data.len(),
                 ud,
                 cb,
             )));
-            unwrap!(call_0(|ud, cb| mdata_entries_insert(
+            unwrap!(call_0(|ud, cb| seq_mdata_entries_insert(
                 &app,
                 handle,
                 key1.as_ptr(),
                 key1.len(),
-                value1.content.as_ptr(),
-                value1.content.len(),
+                value1.data.as_ptr(),
+                value1.data.len(),
                 ud,
                 cb,
             )));
             handle
         };
 
-        let len2: usize =
-            unsafe { unwrap!(call_1(|ud, cb| mdata_entries_len(&app, handle1, ud, cb))) };
+        let len2: usize = unsafe {
+            unwrap!(call_1(|ud, cb| seq_mdata_entries_len(
+                &app, handle1, ud, cb
+            )))
+        };
 
         assert_eq!(len1, len2);
 
-        let (tx, rx) = mpsc::channel::<Value>();
+        let (tx, rx) = mpsc::channel::<MDataSeqValue>();
 
         extern "C" fn get_cb(
             user_data: *mut c_void,
@@ -312,9 +318,9 @@ mod tests {
                 assert_eq!((*res).error_code, 0);
 
                 let value = vec_clone_from_raw_parts(ptr, len);
-                let value = Value {
-                    content: value,
-                    entry_version: version,
+                let value = MDataSeqValue {
+                    data: value,
+                    version,
                 };
 
                 send_via_user_data(user_data, value)
@@ -325,7 +331,7 @@ mod tests {
 
         // Key 0
         unsafe {
-            mdata_entries_get(
+            seq_mdata_entries_get(
                 &app,
                 handle0,
                 key0.as_ptr(),
@@ -339,7 +345,7 @@ mod tests {
 
         // Key 1
         unsafe {
-            mdata_entries_get(
+            seq_mdata_entries_get(
                 &app,
                 handle0,
                 key1.as_ptr(),
@@ -352,8 +358,11 @@ mod tests {
         assert_eq!(value, value1);
 
         // Get list of entries, verify number of entries
-        let entries: Vec<MDataEntry> =
-            unsafe { unwrap!(call_vec(|ud, cb| mdata_list_entries(&app, handle0, ud, cb))) };
+        let entries: Vec<MDataEntry> = unsafe {
+            unwrap!(call_vec(|ud, cb| seq_mdata_list_entries(
+                &app, handle0, ud, cb
+            )))
+        };
 
         assert_eq!(entries.len(), 2);
 
@@ -368,8 +377,12 @@ mod tests {
 
         // Free
         unsafe {
-            unwrap!(call_0(|ud, cb| mdata_entries_free(&app, handle0, ud, cb)));
-            unwrap!(call_0(|ud, cb| mdata_entries_free(&app, handle1, ud, cb)))
+            unwrap!(call_0(|ud, cb| seq_mdata_entries_free(
+                &app, handle0, ud, cb
+            )));
+            unwrap!(call_0(|ud, cb| seq_mdata_entries_free(
+                &app, handle1, ud, cb
+            )))
         }
     }
 
@@ -393,17 +406,23 @@ mod tests {
         };
 
         // Create a permissions set
-        let perms_set = PermissionSet::new().allow(Action::Insert);
+        let perms_set = MDataPermissionSet::new()
+            .allow(MDataAction::Read)
+            .allow(MDataAction::Insert);
 
         // Create permissions for anyone
         let perms_h: MDataPermissionsHandle =
             unsafe { unwrap!(call_1(|ud, cb| mdata_permissions_new(&app, ud, cb))) };
 
+        let app_pk_handle = unwrap!(run(&app, move |client, context| {
+            Ok(context.object_cache().insert_pub_key(client.public_key()))
+        }));
+
         unsafe {
             unwrap!(call_0(|ud, cb| mdata_permissions_insert(
                 &app,
                 perms_h,
-                USER_ANYONE,
+                app_pk_handle,
                 &permission_set_into_repr_c(perms_set),
                 ud,
                 cb,
@@ -411,8 +430,14 @@ mod tests {
         };
 
         // Create an empty public mdata
-        let md_info: NativeMDataInfo =
-            unsafe { unwrap!(call_1(|ud, cb| mdata_info_random_public(10_000, ud, cb))) };
+        let md_info: NativeMDataInfo = unsafe {
+            unwrap!(call_1(|ud, cb| mdata_info_random_public(
+                MDataKind::Seq,
+                10_000,
+                ud,
+                cb
+            )))
+        };
         let md_info = md_info.into_repr_c();
 
         unsafe {
@@ -433,8 +458,11 @@ mod tests {
         assert_eq!(keys.len(), 0);
 
         // Ditto for values
-        let values: Vec<MDataValue> =
-            unsafe { unwrap!(call_vec(|ud, cb| mdata_list_values(&app, &md_info, ud, cb))) };
+        let values: Vec<MDataValue> = unsafe {
+            unwrap!(call_vec(|ud, cb| seq_mdata_list_values(
+                &app, &md_info, ud, cb
+            )))
+        };
 
         assert_eq!(values.len(), 0);
 
@@ -484,8 +512,11 @@ mod tests {
         assert!(keys.contains(&MDataKey(key0)));
         assert!(keys.contains(&MDataKey(key1)));
 
-        let values: Vec<MDataValue> =
-            unsafe { unwrap!(call_vec(|ud, cb| mdata_list_values(&app, &md_info, ud, cb))) };
+        let values: Vec<MDataValue> = unsafe {
+            unwrap!(call_vec(|ud, cb| seq_mdata_list_values(
+                &app, &md_info, ud, cb
+            )))
+        };
         assert_eq!(values.len(), 2);
 
         assert!(values.contains(&value0));

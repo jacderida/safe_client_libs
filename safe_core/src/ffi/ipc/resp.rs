@@ -6,8 +6,6 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-#![allow(unsafe_code)]
-
 use crate::ffi::arrays::*;
 use crate::ffi::ipc::req::PermissionSet;
 use crate::ffi::MDataInfo;
@@ -20,7 +18,7 @@ use std::ptr;
 #[derive(Clone, Copy)]
 pub struct AppKeys {
     /// Owner signing public key
-    pub owner_key: SignPublicKey,
+    pub owner_key: BlsPublicKey,
     /// Data symmetric encryption key
     pub enc_key: SymSecretKey,
     /// Asymmetric sign public key.
@@ -123,7 +121,7 @@ impl Drop for AuthGranted {
 #[repr(C)]
 pub struct AppAccess {
     /// App's or user's public key.
-    pub sign_key: SignPublicKey,
+    pub sign_key: BlsPublicKey,
     /// A list of permissions.
     pub permissions: PermissionSet,
     /// App's user-facing name.

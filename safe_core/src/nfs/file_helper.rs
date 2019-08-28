@@ -14,7 +14,8 @@ use crate::self_encryption_storage::SelfEncryptionStorage;
 use crate::utils::FutureExt;
 use futures::{Future, IntoFuture};
 use maidsafe_utilities::serialisation::{deserialise, serialise};
-use routing::{ClientError, EntryActions};
+use safe_nd::{Error as SndError, MDataSeqEntryActions};
+use serde::{Deserialize, Serialize};
 
 /// Enum specifying which version should be used in places where a version is required.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -43,17 +44,17 @@ where
         })
         .into_future()
         .and_then(move |(key, value)| {
-            client.mutate_mdata_entries(
-                parent.name,
-                parent.type_tag,
-                EntryActions::new().ins(key, value, 0).into(),
+            client.mutate_seq_mdata_entries(
+                parent.name(),
+                parent.type_tag(),
+                MDataSeqEntryActions::new().ins(key, value, 0),
             )
         })
         .map_err(From::from)
         .into_box()
 }
 
-/// Get a file from the directory.
+/// Get a file and its version from the directory.
 pub fn fetch<S>(client: impl Client, parent: MDataInfo, name: S) -> Box<NfsFuture<(u64, File)>>
 where
     S: AsRef<str>,
@@ -63,13 +64,13 @@ where
         .into_future()
         .and_then(move |key| {
             client
-                .get_mdata_value(parent.name, parent.type_tag, key)
+                .get_seq_mdata_value(parent.name(), parent.type_tag(), key)
                 .map(move |value| (value, parent))
         })
         .and_then(move |(value, parent)| {
-            let plaintext = parent.decrypt(&value.content)?;
+            let plaintext = parent.decrypt(&value.data)?;
             let file = deserialise(&plaintext)?;
-            Ok((value.entry_version, file))
+            Ok((value.version, file))
         })
         .map_err(convert_error)
         .into_box()
@@ -84,7 +85,7 @@ pub fn read<C: Client>(
     trace!("Reading file {:?}", file);
     Reader::new(
         client.clone(),
-        SelfEncryptionStorage::new(client),
+        SelfEncryptionStorage::new(client, file.published()),
         file,
         encryption_key,
     )
@@ -95,26 +96,30 @@ pub fn read<C: Client>(
 /// If `version` is `Version::GetNext`, the current version is first retrieved from the network, and
 /// that version incremented by one is then used as the actual version.
 // Allow pass by value for consistency with other functions.
-#[allow(unknown_lints)]
 #[allow(clippy::needless_pass_by_value)]
 pub fn delete<S>(
     client: impl Client,
     parent: MDataInfo,
     name: S,
+    published: bool,
     version: Version,
 ) -> Box<NfsFuture<u64>>
 where
     S: AsRef<str>,
 {
     let name = name.as_ref();
+    let name2 = name.to_owned().clone();
+    let client2 = client.clone();
+    let client3 = client.clone();
+    let parent2 = parent.clone();
     trace!("Deleting file with name {}.", name);
 
     let key = fry!(parent.enc_entry_key(name.as_bytes()));
 
     let version_fut = match version {
         Version::GetNext => client
-            .get_mdata_value(parent.name, parent.type_tag, key.clone())
-            .map(move |value| (value.entry_version + 1))
+            .get_seq_mdata_value(parent.name(), parent.type_tag(), key.clone())
+            .map(move |value| (value.version + 1))
             .into_box(),
         Version::Custom(version) => ok!(version),
     }
@@ -122,11 +127,25 @@ where
 
     version_fut
         .and_then(move |version| {
-            client
-                .mutate_mdata_entries(
-                    parent.name,
-                    parent.type_tag,
-                    EntryActions::new().del(key, version).into(),
+            if !published {
+                fetch(client, parent2, name2)
+                    .and_then(move |(_, file)| {
+                        client2
+                            .del_unpub_idata(*file.data_map_name())
+                            .map(move |_| version)
+                            .map_err(NfsError::from)
+                    })
+                    .into_box()
+            } else {
+                ok!(version)
+            }
+        })
+        .and_then(move |version| {
+            client3
+                .mutate_seq_mdata_entries(
+                    parent.name(),
+                    parent.type_tag(),
+                    MDataSeqEntryActions::new().del(key, version),
                 )
                 .map(move |()| version)
                 .map_err(convert_error)
@@ -164,17 +183,17 @@ where
         .into_future()
         .and_then(move |(key, content)| match version {
             Version::GetNext => client
-                .get_mdata_value(parent.name, parent.type_tag, key.clone())
-                .map(move |value| (key, content, value.entry_version + 1, parent))
+                .get_seq_mdata_value(parent.name(), parent.type_tag(), key.clone())
+                .map(move |value| (key, content, value.version + 1, parent))
                 .into_box(),
             Version::Custom(version) => ok!((key, content, version, parent)),
         })
         .and_then(move |(key, content, version, parent)| {
             client2
-                .mutate_mdata_entries(
-                    parent.name,
-                    parent.type_tag,
-                    EntryActions::new().update(key, content, version).into(),
+                .mutate_seq_mdata_entries(
+                    parent.name(),
+                    parent.type_tag(),
+                    MDataSeqEntryActions::new().update(key, content, version),
                 )
                 .map(move |()| version)
         })
@@ -196,7 +215,7 @@ pub fn write<C: Client>(
 
     Writer::new(
         &client.clone(),
-        SelfEncryptionStorage::new(client),
+        SelfEncryptionStorage::new(client, file.published()),
         file,
         mode,
         encryption_key,
@@ -208,7 +227,7 @@ pub fn write<C: Client>(
 // TODO:  consider performing such conversion directly in the mentioned `impl From`.
 fn convert_error(err: CoreError) -> NfsError {
     match err {
-        CoreError::RoutingClientError(ClientError::NoSuchEntry) => NfsError::FileNotFound,
+        CoreError::DataError(SndError::NoSuchEntry) => NfsError::FileNotFound,
         _ => NfsError::from(err),
     }
 }

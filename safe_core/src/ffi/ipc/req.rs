@@ -10,7 +10,8 @@ use crate::ffi::arrays::XorNameArray;
 use crate::ipc::req::permission_set_into_repr_c;
 use ffi_utils::callback::CallbackArgs;
 use ffi_utils::ReprC;
-use routing;
+use safe_nd::MDataPermissionSet;
+use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::os::raw::c_char;
 
@@ -44,7 +45,7 @@ impl ReprC for PermissionSet {
 
 impl CallbackArgs for PermissionSet {
     fn default() -> Self {
-        permission_set_into_repr_c(routing::PermissionSet::new())
+        permission_set_into_repr_c(MDataPermissionSet::new())
     }
 }
 
@@ -67,7 +68,6 @@ pub struct AppExchangeInfo {
 }
 
 impl Drop for AppExchangeInfo {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         unsafe {
             let _ = CString::from_raw(self.id as *mut _);
@@ -90,7 +90,6 @@ pub struct ContainerPermissions {
 }
 
 impl Drop for ContainerPermissions {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         unsafe {
             let _ = CString::from_raw(self.cont_name as *mut _);
@@ -107,6 +106,9 @@ pub struct AuthReq {
     /// otherwise.
     pub app_container: bool,
 
+    /// App has permission to transfer coins on behalf of the user.
+    pub app_permission_transfer_coins: bool,
+
     /// Array of `ContainerPermissions`
     pub containers: *const ContainerPermissions,
 
@@ -119,7 +121,6 @@ pub struct AuthReq {
 }
 
 impl Drop for AuthReq {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         unsafe {
             let _ = Vec::from_raw_parts(
@@ -146,7 +147,6 @@ pub struct ContainersReq {
 }
 
 impl Drop for ContainersReq {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         unsafe {
             let _ = Vec::from_raw_parts(
@@ -183,7 +183,6 @@ pub struct ShareMDataReq {
 }
 
 impl Drop for ShareMDataReq {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
         unsafe {
             let _ = Vec::from_raw_parts(

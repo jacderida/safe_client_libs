@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -58,9 +58,6 @@ maidsafe_logo.png",
 )]
 #![allow(
     box_pointers,
-    clippy::implicit_hasher,
-    clippy::too_many_arguments,
-    clippy::use_debug,
     missing_copy_implementations,
     missing_debug_implementations,
     variant_size_differences
@@ -81,14 +78,11 @@ extern crate unwrap;
 
 // Re-export functions used in FFI so that they are accessible through the Rust API.
 
-pub use routing::{
-    Action, ClientError, EntryAction, ImmutableData, MutableData, PermissionSet, User, Value,
-    XorName, XOR_NAME_LEN,
-};
 pub use safe_core::{
     app_container_name, immutable_data, ipc, mdata_info, nfs, utils, Client, ClientKeys, CoreError,
     CoreFuture, FutureExt, MDataInfo, DIR_TAG, MAIDSAFE_TAG,
 };
+pub use safe_nd::PubImmutableData;
 
 // Export FFI interface.
 
@@ -138,14 +132,14 @@ use safe_core::crypto::shared_secretbox;
 use safe_core::ipc::resp::{access_container_enc_key, AccessContainerEntry};
 use safe_core::ipc::{AccessContInfo, AppKeys, AuthGranted, BootstrapConfig};
 #[cfg(feature = "mock-network")]
-use safe_core::MockRouting as Routing;
+use safe_core::ConnectionManager;
 use safe_core::{event_loop, CoreMsg, CoreMsgTx, NetworkEvent, NetworkTx};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Mutex;
-use tokio_core::reactor::{Core, Handle};
+use tokio::runtime::current_thread::{Handle, Runtime};
 
 macro_rules! try_tx {
     ($result:expr, $tx:ident) => {
@@ -156,7 +150,7 @@ macro_rules! try_tx {
     };
 }
 
-type AppFuture<T> = Future<Item = T, Error = AppError>;
+type AppFuture<T> = dyn Future<Item = T, Error = AppError>;
 type AppMsgTx = CoreMsgTx<AppClient, AppContext>;
 
 /// Handle to an application instance.
@@ -169,7 +163,7 @@ impl App {
     /// Send a message to app's event loop.
     pub fn send<F>(&self, f: F) -> Result<(), AppError>
     where
-        F: FnOnce(&AppClient, &AppContext) -> Option<Box<Future<Item = (), Error = ()>>>
+        F: FnOnce(&AppClient, &AppContext) -> Option<Box<dyn Future<Item = (), Error = ()>>>
             + Send
             + 'static,
     {
@@ -186,7 +180,7 @@ impl App {
     where
         N: FnMut() + Send + 'static,
     {
-        Self::new(disconnect_notifier, |el_h, core_tx, net_tx| {
+        Self::new(disconnect_notifier, move |el_h, core_tx, net_tx| {
             let client = AppClient::unregistered(el_h, core_tx, net_tx, config)?;
             let context = AppContext::unregistered();
             Ok((client, context))
@@ -222,6 +216,8 @@ impl App {
                     enc_sk,
                     sign_pk,
                     sign_sk,
+                    bls_sk,
+                    bls_pk,
                 },
             access_container_info,
             bootstrap_config,
@@ -234,6 +230,8 @@ impl App {
             enc_pk,
             enc_sk,
             enc_key: enc_key.clone(),
+            bls_pk,
+            bls_sk,
         };
 
         Self::new(disconnect_notifier, move |el_h, core_tx, net_tx| {
@@ -250,17 +248,17 @@ impl App {
         })
     }
 
-    /// Allows customising the mock Routing client before registering a new account.
+    /// Allows customising the mock Connection Manager before registering a new account.
     #[cfg(feature = "mock-network")]
     pub fn registered_with_hook<N, F>(
         app_id: String,
         auth_granted: AuthGranted,
         disconnect_notifier: N,
-        routing_wrapper_fn: F,
+        connection_manager_wrapper_fn: F,
     ) -> Result<Self, AppError>
     where
         N: FnMut() + Send + 'static,
-        F: Fn(Routing) -> Routing + Send + 'static,
+        F: Fn(ConnectionManager) -> ConnectionManager + Send + 'static,
     {
         let AuthGranted {
             app_keys:
@@ -271,6 +269,8 @@ impl App {
                     enc_sk,
                     sign_pk,
                     sign_sk,
+                    bls_pk,
+                    bls_sk,
                 },
             access_container_info,
             bootstrap_config,
@@ -283,6 +283,8 @@ impl App {
             enc_pk,
             enc_sk,
             enc_key: enc_key.clone(),
+            bls_pk,
+            bls_sk,
         };
 
         Self::new(disconnect_notifier, move |el_h, core_tx, net_tx| {
@@ -293,7 +295,7 @@ impl App {
                 core_tx,
                 net_tx,
                 bootstrap_config,
-                routing_wrapper_fn,
+                connection_manager_wrapper_fn,
             )?;
             let context = AppContext::registered(app_id, enc_key, access_container_info);
             Ok((client, context))
@@ -310,13 +312,13 @@ impl App {
         let (tx, rx) = mpsc::sync_channel(0);
 
         let joiner = thread::named("App Event Loop", move || {
-            let el = try_tx!(Core::new(), tx);
+            let mut el = try_tx!(Runtime::new(), tx);
             let el_h = el.handle();
 
             let (core_tx, core_rx) = futures_mpsc::unbounded();
             let (net_tx, net_rx) = futures_mpsc::unbounded();
 
-            el_h.spawn(
+            let _ = el.spawn(
                 net_rx
                     .map(move |event| {
                         if let NetworkEvent::Disconnected = event {
@@ -472,14 +474,14 @@ fn refresh_access_info(context: Rc<Registered>, client: &AppClient) -> Box<AppFu
     ));
 
     client
-        .get_mdata_value(
+        .get_seq_mdata_value(
             context.access_container_info.id,
             context.access_container_info.tag,
             entry_key,
         )
         .map_err(AppError::from)
         .and_then(move |value| {
-            let encoded = utils::symmetric_decrypt(&value.content, &context.sym_enc_key)?;
+            let encoded = utils::symmetric_decrypt(&value.data, &context.sym_enc_key)?;
             let decoded = deserialise(&encoded)?;
 
             *context.access_info.borrow_mut() = decoded;

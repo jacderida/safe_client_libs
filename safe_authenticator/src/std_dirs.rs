@@ -12,16 +12,16 @@ use crate::config::KEY_APPS;
 use crate::{AuthError, AuthFuture};
 use futures::{future, Future};
 use maidsafe_utilities::serialisation::serialise;
-use routing::{ClientError, Value};
 use safe_core::ipc::access_container_enc_key;
 use safe_core::mdata_info;
 use safe_core::nfs::create_dir;
 use safe_core::utils::symmetric_encrypt;
 use safe_core::{Client, CoreError, FutureExt, MDataInfo, DIR_TAG};
+use safe_nd::{Error as SndError, MDataKind, MDataSeqValue};
 use std::collections::HashMap;
 
 /// Default directories to be created at registration.
-pub static DEFAULT_PRIVATE_DIRS: [&'static str; 6] = [
+pub static DEFAULT_PRIVATE_DIRS: [&str; 6] = [
     "_documents",
     "_downloads",
     "_music",
@@ -31,7 +31,7 @@ pub static DEFAULT_PRIVATE_DIRS: [&'static str; 6] = [
 ];
 
 /// Publicly accessible default directories to be created upon registration.
-pub static DEFAULT_PUBLIC_DIRS: [&'static str; 1] = ["_public"];
+pub static DEFAULT_PUBLIC_DIRS: [&str; 1] = ["_public"];
 
 /// Create the root directories and the standard directories for the access container.
 pub fn create(client: &AuthClient) -> Box<AuthFuture<()>> {
@@ -51,9 +51,7 @@ pub fn create(client: &AuthClient) -> Box<AuthFuture<()>> {
                     // Make sure that all default dirs have been created
                     create_std_dirs(&c3, &default_containers)
                 }
-                Err(AuthError::CoreError(CoreError::RoutingClientError(
-                    ClientError::NoSuchData,
-                ))) => {
+                Err(AuthError::CoreError(CoreError::DataError(SndError::NoSuchData))) => {
                     // Access container hasn't been created yet
                     let access_cont_value = fry!(random_std_dirs())
                         .into_iter()
@@ -85,7 +83,7 @@ pub fn create(client: &AuthClient) -> Box<AuthFuture<()>> {
 
 fn create_config_dir(client: &AuthClient, config_dir: &MDataInfo) -> Box<AuthFuture<()>> {
     let config_dir_entries =
-        btree_map![KEY_APPS.to_vec() => Value { content: Vec::new(), entry_version: 0 }];
+        btree_map![KEY_APPS.to_vec() => MDataSeqValue { data: Vec::new(), version: 0 }];
 
     let config_dir_entries = fry!(mdata_info::encrypt_entries(config_dir, &config_dir_entries));
 
@@ -99,9 +97,7 @@ fn create_access_container(
     access_container: &MDataInfo,
     default_entries: &HashMap<String, MDataInfo>,
 ) -> Box<AuthFuture<()>> {
-    let enc_key = fry!(client
-        .secret_symmetric_key()
-        .ok_or_else(|| AuthError::Unexpected("Secret symmetric key not found".to_string())));
+    let enc_key = client.secret_symmetric_key();
 
     // Create access container
     let authenticator_key = fry!(access_container_enc_key(
@@ -122,7 +118,7 @@ fn create_access_container(
         client,
         access_container,
         btree_map![
-            authenticator_key => Value { entry_version: 0, content: access_cont_value }
+            authenticator_key => MDataSeqValue { version: 0, data: access_cont_value }
         ],
         btree_map![],
     )
@@ -136,10 +132,10 @@ fn create_access_container(
 pub fn random_std_dirs() -> Result<Vec<(&'static str, MDataInfo)>, CoreError> {
     let pub_dirs = DEFAULT_PUBLIC_DIRS
         .iter()
-        .map(|name| MDataInfo::random_public(DIR_TAG).map(|dir| (*name, dir)));
+        .map(|name| MDataInfo::random_public(MDataKind::Seq, DIR_TAG).map(|dir| (*name, dir)));
     let priv_dirs = DEFAULT_PRIVATE_DIRS
         .iter()
-        .map(|name| MDataInfo::random_private(DIR_TAG).map(|dir| (*name, dir)));
+        .map(|name| MDataInfo::random_private(MDataKind::Seq, DIR_TAG).map(|dir| (*name, dir)));
     priv_dirs.chain(pub_dirs).collect()
 }
 

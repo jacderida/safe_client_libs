@@ -25,12 +25,16 @@ use data_encoding::BASE32_NOPAD;
 #[cfg(any(test, feature = "testing"))]
 use ffi_utils;
 use maidsafe_utilities::serialisation::{deserialise, serialise};
+use quic_p2p::NodeInfo;
 use rand::{self, Rng};
-pub use routing::BootstrapConfig;
+use serde::{Deserialize, Serialize};
 use std::u32;
 
+/// QuicP2P bootstrap info, shared from Authenticator to apps.
+pub type BootstrapConfig = Vec<NodeInfo>;
+
 /// IPC message.
-#[cfg_attr(feature = "cargo-clippy", allow(clippy::large_enum_variant))]
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum IpcMsg {
     /// Request.
@@ -73,8 +77,6 @@ pub fn encode_msg_64(msg: &IpcMsg) -> Result<String, IpcError> {
 }
 
 /// Decode `IpcMsg` encoded with base32 encoding.
-// FIXME: bug in clippy - comparison on cfg!(..) deemed a needless bool comparison
-#[cfg_attr(feature = "cargo-clippy", allow(clippy::bool_comparison))]
 pub fn decode_msg(encoded: &str) -> Result<IpcMsg, IpcError> {
     let mut chars = encoded.chars();
     let decoded = match chars.next().ok_or(IpcError::InvalidMsg)? {
@@ -85,7 +87,7 @@ pub fn decode_msg(encoded: &str) -> Result<IpcMsg, IpcError> {
     };
 
     let (msg, mock): (IpcMsg, bool) = deserialise(&decoded)?;
-    if mock != cfg!(feature = "mock-network") {
+    if mock ^ cfg!(feature = "mock-network") {
         return Err(IpcError::IncompatibleMockStatus);
     }
 

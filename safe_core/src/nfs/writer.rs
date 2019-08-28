@@ -43,7 +43,7 @@ impl<C: Client> Writer<C> {
         encryption_key: Option<shared_secretbox::Key>,
     ) -> Box<NfsFuture<Writer<C>>> {
         let fut = match mode {
-            Mode::Append => data_map::get(client, file.data_map_name(), encryption_key.clone())
+            Mode::Append => data_map::get(client, file.data_address(), encryption_key.clone())
                 .map(Some)
                 .into_box(),
             Mode::Overwrite => ok!(None),
@@ -84,11 +84,14 @@ impl<C: Client> Writer<C> {
         let size = self.self_encryptor.len();
         let client = self.client;
         let encryption_key = self.encryption_key;
+        let published = file.published();
 
         self.self_encryptor
             .close()
             .map_err(From::from)
-            .and_then(move |(data_map, _)| data_map::put(&client, &data_map, encryption_key))
+            .and_then(move |(data_map, _)| {
+                data_map::put(&client, &data_map, published, encryption_key)
+            })
             .map(move |data_map_name| {
                 file.set_data_map_name(data_map_name);
                 file.set_modified_time(Utc::now());

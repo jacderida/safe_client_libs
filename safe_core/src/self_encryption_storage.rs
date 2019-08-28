@@ -8,7 +8,7 @@
 
 use super::{Client, CoreError, FutureExt};
 use futures::{self, Future};
-use routing::{ImmutableData, XorName, XOR_NAME_LEN};
+use safe_nd::{IData, IDataAddress, PubImmutableData, UnpubImmutableData, XorName, XOR_NAME_LEN};
 use self_encryption::{Storage, StorageError};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -17,19 +17,20 @@ use std::fmt::{self, Display, Formatter};
 /// to put or get data from the network.
 pub struct SelfEncryptionStorage<C: Client> {
     client: C,
+    published: bool,
 }
 
 impl<C: Client> SelfEncryptionStorage<C> {
     /// Create a new SelfEncryptionStorage instance.
-    pub fn new(client: C) -> Self {
-        SelfEncryptionStorage { client }
+    pub fn new(client: C, published: bool) -> Self {
+        Self { client, published }
     }
 }
 
 impl<C: Client> Storage for SelfEncryptionStorage<C> {
     type Error = SelfEncryptionStorageError;
 
-    fn get(&self, name: &[u8]) -> Box<Future<Item = Vec<u8>, Error = Self::Error>> {
+    fn get(&self, name: &[u8]) -> Box<dyn Future<Item = Vec<u8>, Error = Self::Error>> {
         trace!("Self encrypt invoked GetIData.");
 
         if name.len() != XOR_NAME_LEN {
@@ -44,17 +45,40 @@ impl<C: Client> Storage for SelfEncryptionStorage<C> {
             XorName(temp)
         };
 
+        let address = if self.published {
+            IDataAddress::Pub(name)
+        } else {
+            IDataAddress::Unpub(name)
+        };
+
         self.client
-            .get_idata(name)
+            .get_idata(address)
             .map(|data| data.value().clone())
             .map_err(From::from)
             .into_box()
     }
 
-    fn put(&mut self, _: Vec<u8>, data: Vec<u8>) -> Box<Future<Item = (), Error = Self::Error>> {
+    fn put(
+        &mut self,
+        _: Vec<u8>,
+        data: Vec<u8>,
+    ) -> Box<dyn Future<Item = (), Error = Self::Error>> {
         trace!("Self encrypt invoked PutIData.");
-        let data = ImmutableData::new(data);
-        self.client.put_idata(data).map_err(From::from).into_box()
+        let idata: IData = if self.published {
+            PubImmutableData::new(data).into()
+        } else {
+            UnpubImmutableData::new(data, self.client.public_key()).into()
+        };
+        self.client.put_idata(idata).map_err(From::from).into_box()
+    }
+
+    fn generate_address(&self, data: &[u8]) -> Vec<u8> {
+        let idata: IData = if self.published {
+            PubImmutableData::new(data.to_vec()).into()
+        } else {
+            UnpubImmutableData::new(data.to_vec(), self.client.public_key()).into()
+        };
+        idata.name().0.to_vec()
     }
 }
 
@@ -73,11 +97,8 @@ impl Error for SelfEncryptionStorageError {
         self.0.description()
     }
 
-    fn cause(&self) -> Option<&Error> {
-        // Temporarily turn off the deprecation lint here.
-        // Change from `cause()` to `source()` and delete this `allow` once we're on stable Rust.
-        #[allow(deprecated)]
-        self.0.cause()
+    fn cause(&self) -> Option<&dyn Error> {
+        self.0.source()
     }
 }
 

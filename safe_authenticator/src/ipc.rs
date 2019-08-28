@@ -15,8 +15,6 @@ use ffi_utils::StringError;
 use futures::future::{self, Either};
 use futures::Future;
 use maidsafe_utilities::serialisation::deserialise;
-use routing::{ClientError, User, XorName};
-use rust_sodium::crypto::sign;
 use safe_core::ffi::ipc::resp::MetadataResponse as FfiUserMetadata;
 use safe_core::ipc::req::{
     container_perms_into_permission_set, ContainerPermissions, IpcReq, ShareMDataReq,
@@ -24,12 +22,13 @@ use safe_core::ipc::req::{
 use safe_core::ipc::resp::{AccessContainerEntry, IpcResp, UserMetadata, METADATA_KEY};
 use safe_core::ipc::{self, IpcError, IpcMsg};
 use safe_core::{recovery, Client, CoreError, FutureExt};
+use safe_nd::{Error as SndError, PublicKey, XorName};
 use std::collections::HashMap;
 use std::ffi::CString;
 
 /// Decodes a given encoded IPC message and returns either an `IpcMsg` struct or
 /// an error code + description & an encoded `IpcMsg::Resp` in case of an error
-#[cfg_attr(feature = "cargo-clippy", allow(clippy::type_complexity))]
+#[allow(clippy::type_complexity)]
 pub fn decode_ipc_msg(
     client: &AuthClient,
     msg: IpcMsg,
@@ -64,8 +63,9 @@ pub fn decode_ipc_msg(
             req: IpcReq::Containers(cont_req),
             req_id,
         } => {
-            let app_id = cont_req.app.id.clone();
+            trace!("Handling IpcReq::Containers({:?})", cont_req);
 
+            let app_id = cont_req.app.id.clone();
             let c2 = client.clone();
 
             config::list_apps(client)
@@ -103,7 +103,7 @@ pub fn decode_ipc_msg(
 pub fn update_container_perms(
     client: &AuthClient,
     permissions: HashMap<String, ContainerPermissions>,
-    sign_pk: sign::PublicKey,
+    app_pk: PublicKey,
 ) -> Box<AuthFuture<AccessContainerEntry>> {
     let c2 = client.clone();
 
@@ -120,13 +120,12 @@ pub fn update_container_perms(
                 let perm_set = container_perms_into_permission_set(&access);
 
                 let fut = client
-                    .get_mdata_version(mdata_info.name, mdata_info.type_tag)
+                    .get_mdata_version(*mdata_info.address())
                     .and_then(move |version| {
                         recovery::set_mdata_user_permissions(
                             &c2,
-                            mdata_info.name,
-                            mdata_info.type_tag,
-                            User::Key(sign_pk),
+                            *mdata_info.address(),
+                            app_pk,
                             perm_set,
                             version + 1,
                         )
@@ -163,9 +162,7 @@ pub fn decode_share_mdata_req(
     client: &AuthClient,
     req: &ShareMDataReq,
 ) -> Box<AuthFuture<Vec<Option<FfiUserMetadata>>>> {
-    let user = fry!(client
-        .public_signing_key()
-        .ok_or_else(|| AuthError::Unexpected("Public signing key not found".to_string())));
+    let user = client.public_key();
     let num_mdata = req.mdata.len();
     let mut futures = Vec::with_capacity(num_mdata);
 
@@ -175,13 +172,13 @@ pub fn decode_share_mdata_req(
         let type_tag = mdata.type_tag;
 
         let future = client
-            .get_mdata_shell(name, type_tag)
+            .get_seq_mdata_shell(name, type_tag)
             .and_then(move |shell| {
-                if shell.owners().contains(&user) {
+                if *shell.owner() == user {
                     let future_metadata = client
-                        .get_mdata_value(name, type_tag, METADATA_KEY.into())
+                        .get_seq_mdata_value(name, type_tag, METADATA_KEY.into())
                         .then(move |res| match res {
-                            Ok(value) => Ok(deserialise::<UserMetadata>(&value.content)
+                            Ok(value) => Ok(deserialise::<UserMetadata>(&value.data)
                                 .map_err(|_| ShareMDataError::InvalidMetadata)
                                 .and_then(move |metadata| {
                                     match metadata.into_md_response(name, type_tag) {
@@ -189,7 +186,7 @@ pub fn decode_share_mdata_req(
                                         Err(_) => Err(ShareMDataError::InvalidMetadata),
                                     }
                                 })),
-                            Err(CoreError::RoutingClientError(ClientError::NoSuchEntry)) => {
+                            Err(CoreError::DataError(SndError::NoSuchEntry)) => {
                                 // Allow requesting shared access to arbitrary Mutable Data objects even
                                 // if they don't have metadata.
                                 let user_metadata = UserMetadata {

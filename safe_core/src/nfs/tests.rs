@@ -21,8 +21,11 @@ use futures::future::{self, Loop};
 use futures::Future;
 use rand::{self, Rng};
 use rust_sodium::crypto::secretbox;
+use safe_nd::{Error as SndError, MDataKind};
 use self_encryption::MIN_CHUNK_SIZE;
 use std;
+use std::sync::mpsc;
+use std::thread;
 
 const APPEND_SIZE: usize = 10;
 const ORIG_SIZE: usize = 5555;
@@ -30,11 +33,12 @@ const NEW_SIZE: usize = 50;
 
 fn create_test_file_with_size(
     client: &CoreClient,
+    published: bool,
     size: usize,
 ) -> Box<NfsFuture<(MDataInfo, File)>> {
     let c2 = client.clone();
     let c3 = client.clone();
-    let root = unwrap!(MDataInfo::random_private(DIR_TAG));
+    let root = unwrap!(MDataInfo::random_private(MDataKind::Seq, DIR_TAG));
     let root2 = root.clone();
 
     create_dir(client, &root, btree_map![], btree_map![])
@@ -43,7 +47,7 @@ fn create_test_file_with_size(
 
             file_helper::write(
                 c2.clone(),
-                File::new(Vec::new()),
+                File::new(Vec::new(), published),
                 Mode::Overwrite,
                 root.enc_key().cloned(),
             )
@@ -62,8 +66,8 @@ fn create_test_file_with_size(
         .into_box()
 }
 
-fn create_test_file(client: &CoreClient) -> Box<NfsFuture<(MDataInfo, File)>> {
-    create_test_file_with_size(client, ORIG_SIZE)
+fn create_test_file(client: &CoreClient, published: bool) -> Box<NfsFuture<(MDataInfo, File)>> {
+    create_test_file_with_size(client, published, ORIG_SIZE)
 }
 
 // Test inserting files to, and fetching from, a public mdata.
@@ -81,7 +85,8 @@ fn file_fetch_public_md() {
         let c5 = client.clone();
         let c6 = client.clone();
         let c7 = client.clone();
-        let mut root = unwrap!(MDataInfo::random_public(DIR_TAG));
+
+        let mut root = unwrap!(MDataInfo::random_public(MDataKind::Unseq, DIR_TAG));
         root.enc_info = Some((shared_secretbox::gen_key(), secretbox::gen_nonce()));
         root.new_enc_info = Some((shared_secretbox::gen_key(), secretbox::gen_nonce()));
         let root2 = root.clone();
@@ -92,7 +97,7 @@ fn file_fetch_public_md() {
 
                 file_helper::write(
                     c2.clone(),
-                    File::new(Vec::new()),
+                    File::new(Vec::new(), true),
                     Mode::Overwrite,
                     root.enc_key().cloned(),
                 )
@@ -123,7 +128,7 @@ fn file_fetch_public_md() {
             .then(move |res| {
                 let (reader, dir) = unwrap!(res);
                 let size = reader.size();
-                println!("reading {} bytes", size);
+                trace!("reading {} bytes", size);
                 reader.read(0, size).map(move |data| {
                     assert_eq!(data, vec![0u8; ORIG_SIZE]);
                     dir
@@ -145,12 +150,103 @@ fn file_fetch_public_md() {
             .then(move |res| {
                 let (reader, _dir) = unwrap!(res);
                 let size = reader.size();
-                println!("reading {} bytes", size);
+                trace!("reading {} bytes", size);
                 reader.read(0, size).map(move |data| {
                     assert_eq!(data, vec![0u8; ORIG_SIZE]);
                 })
             })
     });
+}
+
+// Test inserting files to, and fetching from, a public mdata.
+// Insert a file as Unpublished Immutable data and verify that it can be fetched.
+// Other clients should not be able to fetch the file.
+// After deletion the file should not be accessible anymore.
+#[allow(unsafe_code)]
+#[test]
+fn files_stored_in_unpublished_idata() {
+    let (client1_tx, client1_rx) = mpsc::channel();
+    let (client2_tx, client2_rx) = mpsc::channel();
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let _joiner = thread::spawn(|| {
+        random_client(|client| {
+            let c2 = client.clone();
+            let c3 = client.clone();
+            let c4 = client.clone();
+            let c5 = client.clone();
+            let c6 = client.clone();
+            let c7 = client.clone();
+
+            let root = unwrap!(MDataInfo::random_public(MDataKind::Unseq, DIR_TAG));
+            let root2 = root.clone();
+
+            create_dir(client, &root, btree_map![], btree_map![])
+                .and_then(move |()| {
+                    file_helper::write(
+                        c2.clone(),
+                        File::new(Vec::new(), false),
+                        Mode::Overwrite,
+                        None,
+                    )
+                })
+                .and_then(move |writer| {
+                    writer
+                        .write(&[0u8; ORIG_SIZE])
+                        .and_then(move |_| writer.close())
+                })
+                .and_then(move |file| {
+                    file_helper::insert(c3, root2.clone(), "", &file).map(move |_| root2)
+                })
+                .and_then(move |dir| {
+                    file_helper::fetch(c4, dir.clone(), "").map(move |(_version, file)| (dir, file))
+                })
+                .and_then(move |(dir, file)| {
+                    file_helper::read(c5, &file, None).map(move |reader| (reader, dir))
+                })
+                .and_then(move |(reader, dir)| {
+                    let size = reader.size();
+                    trace!("reading {} bytes", size);
+                    reader.read(0, size).map(move |data| {
+                        assert_eq!(data, vec![0u8; ORIG_SIZE]);
+                        dir
+                    })
+                })
+                .and_then(move |dir| {
+                    // Send the directory name for another client
+                    unwrap!(client1_tx.send(dir.clone()));
+
+                    // Wait for the other client to finish it's attempt to read
+                    unwrap!(client2_rx.recv());
+                    file_helper::delete(c6, dir.clone(), "", false, Version::Custom(1)).map(|_| dir)
+                })
+                .and_then(move |dir| file_helper::fetch(c7, dir.clone(), ""))
+                .then(move |res| {
+                    match res {
+                        Err(NfsError::FileNotFound) => (),
+                        Ok(_) => panic!("Unexpected success"),
+                        Err(e) => panic!("Unexpected error {:?}", e),
+                    }
+                    unwrap!(finish_tx.send(()));
+                    Ok::<_, CoreError>(())
+                })
+        });
+    });
+
+    // Get the directory name and try to fetch a file from it
+    let dir: MDataInfo = unwrap!(client1_rx.recv());
+    random_client(move |client| {
+        file_helper::fetch(client.clone(), dir.clone(), "").then(|res| {
+            match res {
+                Ok(_) => panic!("Unexpected success"),
+                Err(NfsError::CoreError(CoreError::DataError(SndError::AccessDenied))) => (),
+                Err(err) => panic!("Unexpected error: {:?}", err),
+            }
+            Ok::<_, CoreError>(())
+        })
+    });
+    // Send a signal to the first client to continue
+    unwrap!(client2_tx.send(()));
+    unwrap!(finish_rx.recv());
 }
 
 // Create a file and open it for reading.
@@ -160,7 +256,7 @@ fn file_read() {
     random_client(|client| {
         let c2 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, file) = unwrap!(res);
                 let creation_time = *file.created_time();
@@ -171,7 +267,7 @@ fn file_read() {
             .then(|res| {
                 let (reader, file, creation_time) = unwrap!(res);
                 let size = reader.size();
-                println!("reading {} bytes", size);
+                trace!("reading {} bytes", size);
                 let result = reader.read(0, size);
 
                 assert_eq!(creation_time, *file.created_time());
@@ -193,7 +289,7 @@ fn file_read_chunks() {
     random_client(|client| {
         let c2 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, file) = unwrap!(res);
 
@@ -216,7 +312,7 @@ fn file_read_chunks() {
                         } else {
                             CHUNK_SIZE
                         };
-                        println!("reading {} bytes", to_read);
+                        trace!("reading {} bytes", to_read);
                         reader.read(size_read, to_read).then(move |res| {
                             let mut data = unwrap!(res);
 
@@ -239,7 +335,7 @@ fn file_read_chunks() {
                         assert_eq!(result, vec![0u8; ORIG_SIZE]);
 
                         // Read 0 bytes, should succeed
-                        println!("reading 0 bytes");
+                        trace!("reading 0 bytes");
                         reader.read(size, 0).map(move |data| (reader, size, data))
                     },
                 )
@@ -275,7 +371,7 @@ fn file_write_chunks() {
         let c3 = client.clone();
         let c4 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 // Updating file - overwrite
                 let (dir, file) = unwrap!(res);
@@ -293,7 +389,7 @@ fn file_write_chunks() {
                     } else {
                         CHUNK_SIZE
                     };
-                    println!("writing {} bytes", to_write);
+                    trace!("writing {} bytes", to_write);
 
                     writer
                         .write(&content[size_written..size_written + to_write])
@@ -340,7 +436,7 @@ fn file_write_chunks() {
                     } else {
                         CHUNK_SIZE
                     };
-                    println!("writing {} bytes", to_write);
+                    trace!("writing {} bytes", to_write);
 
                     writer
                         .write(&content[size_written..size_written + to_write])
@@ -398,7 +494,7 @@ fn file_update_overwrite() {
         let c4 = client.clone();
         let c5 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 // Updating file - full rewrite
                 let (dir, file) = unwrap!(res);
@@ -436,7 +532,7 @@ fn file_update_overwrite() {
             .then(move |res| {
                 let reader = unwrap!(res);
                 let size = reader.size();
-                println!("reading {} bytes", size);
+                trace!("reading {} bytes", size);
                 reader.read(0, size)
             })
             .map(move |data| {
@@ -455,10 +551,10 @@ fn file_update_append() {
             let c3 = client.clone();
 
             let size = i * MIN_CHUNK_SIZE as usize;
-            println!("Testing with size {}", size);
+            trace!("Testing with size {}", size);
 
             futures.push(
-                create_test_file_with_size(client, size)
+                create_test_file_with_size(client, true, size)
                     .then(move |res| {
                         let (dir, file) = unwrap!(res);
 
@@ -480,7 +576,7 @@ fn file_update_append() {
                     .then(move |res| {
                         let reader = unwrap!(res);
                         let size = reader.size();
-                        println!("reading {} bytes", size);
+                        trace!("reading {} bytes", size);
                         reader.read(0, size)
                     })
                     .map(move |data| {
@@ -501,7 +597,7 @@ fn file_update_metadata() {
         let c2 = client.clone();
         let c3 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, mut file) = unwrap!(res);
 
@@ -529,10 +625,10 @@ fn file_delete() {
         let c2 = client.clone();
         let c3 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, _file) = unwrap!(res);
-                file_helper::delete(c2, dir.clone(), "hello.txt", Version::Custom(1)).map(
+                file_helper::delete(c2, dir.clone(), "hello.txt", true, Version::Custom(1)).map(
                     move |version| {
                         assert_eq!(version, 1);
                         dir
@@ -566,10 +662,10 @@ fn file_delete_then_add() {
         let c5 = client.clone();
         let c6 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, file) = unwrap!(res);
-                file_helper::delete(c2, dir.clone(), "hello.txt", Version::Custom(1))
+                file_helper::delete(c2, dir.clone(), "hello.txt", true, Version::Custom(1))
                     .map(move |_| (dir, file))
             })
             .then(move |res| {
@@ -588,8 +684,7 @@ fn file_delete_then_add() {
             })
             .then(move |res| {
                 let (file, dir) = unwrap!(res);
-                file_helper::update(c4, dir.clone(), "hello.txt", &file, Version::GetNext)
-                    .map(move |_| dir)
+                file_helper::insert(c4, dir.clone(), "hello.txt", &file).map(move |_| dir)
             })
             .then(move |res| {
                 let dir = unwrap!(res);
@@ -598,13 +693,13 @@ fn file_delete_then_add() {
             })
             .then(move |res| {
                 let (version, file, dir) = unwrap!(res);
-                assert_eq!(version, 2);
+                assert_eq!(version, 0);
                 file_helper::read(c6, &file, dir.enc_key().cloned())
             })
             .then(move |res| {
                 let reader = unwrap!(res);
                 let size = reader.size();
-                println!("reading {} bytes", size);
+                trace!("reading {} bytes", size);
                 reader.read(0, size)
             })
             .map(move |data| {
@@ -622,7 +717,7 @@ fn file_open_close() {
         let c4 = client.clone();
         let c5 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, file) = unwrap!(res);
                 // Open the file for reading
@@ -672,7 +767,7 @@ fn file_open_concurrent() {
         let c5 = client.clone();
         let c6 = client.clone();
 
-        create_test_file(client)
+        create_test_file(client, true)
             .then(move |res| {
                 let (dir, file) = unwrap!(res);
 
@@ -774,7 +869,7 @@ fn encryption() {
 
         file_helper::write(
             client.clone(),
-            File::new(Vec::new()),
+            File::new(Vec::new(), true),
             Mode::Overwrite,
             Some(key.clone()),
         )

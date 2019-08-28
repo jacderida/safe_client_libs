@@ -6,61 +6,27 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-mod account;
-mod routing;
-#[cfg(test)]
-mod tests;
 pub mod vault;
 
-pub use self::account::{Account, DEFAULT_MAX_MUTATIONS};
-pub use self::routing::{RequestHookFn, Routing};
-use ::routing::XorName;
+mod account;
+#[macro_use]
+mod routing;
+// #[cfg(test)]
+// mod tests;
+mod connection_manager;
 
-/// Identifier of immutable data
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct ImmutableDataId(pub XorName);
+pub use self::account::{Account, CoinBalance};
+pub use self::connection_manager::{ConnectionManager, RequestHookFn};
+use safe_nd::{ADataAddress, IDataAddress, MDataAddress};
+use serde::{Deserialize, Serialize};
 
-impl ImmutableDataId {
-    pub fn name(&self) -> &XorName {
-        &self.0
-    }
-}
-
-/// Identifier of mutable data
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct MutableDataId(pub XorName, pub u64);
-
-impl MutableDataId {
-    pub fn name(&self) -> &XorName {
-        &self.0
-    }
-}
-
-/// Identifier for a data (immutable or mutable)
+/// Identifier for a data.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub enum DataId {
     /// Identifier of immutable data.
-    Immutable(ImmutableDataId),
+    Immutable(IDataAddress),
     /// Identifier of mutable data.
-    Mutable(MutableDataId),
-}
-
-impl DataId {
-    /// Create `DataId` for immutable data.
-    pub fn immutable(name: XorName) -> Self {
-        DataId::Immutable(ImmutableDataId(name))
-    }
-
-    /// Create `DataId` for mutable data.
-    pub fn mutable(name: XorName, tag: u64) -> Self {
-        DataId::Mutable(MutableDataId(name, tag))
-    }
-
-    /// Get name of this identifier.
-    pub fn name(&self) -> &XorName {
-        match *self {
-            DataId::Immutable(ref id) => id.name(),
-            DataId::Mutable(ref id) => id.name(),
-        }
-    }
+    Mutable(MDataAddress),
+    /// Identifier of appendonly data.
+    AppendOnly(ADataAddress),
 }

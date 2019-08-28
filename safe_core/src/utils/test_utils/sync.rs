@@ -6,10 +6,13 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::client::MockRouting;
+// FIXME
+#![allow(unused)]
+
+use crate::ConnectionManager;
 use maidsafe_utilities::SeededRng;
 use rand::Rng;
-use routing::{Request, Response};
+use safe_nd::{Request, Response};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -25,7 +28,7 @@ impl Synchronizer {
     /// generator. The generator can be initialized with a seed to guarantee
     /// repeatable, deterministic runs.
     pub fn new(rng: SeededRng) -> Self {
-        Synchronizer {
+        Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::new(rng)),
                 condvar: Condvar::new(),
@@ -34,13 +37,14 @@ impl Synchronizer {
     }
 
     /// Install necessary hooks on the given routing instance.
-    pub fn hook(&self, mut routing: MockRouting) -> MockRouting {
-        let req_hook = Rc::new(Hook::new(Arc::clone(&self.inner)));
-        let res_hook = Rc::clone(&req_hook);
+    pub fn hook(&self, mut cm: ConnectionManager) -> ConnectionManager {
+        // let req_hook = Rc::new(Hook::new(Arc::clone(&self.inner)));
+        // let res_hook = Rc::clone(&req_hook);
 
-        routing.set_request_hook(move |req| req_hook.request(req));
-        routing.set_response_hook(move |res| res_hook.response(res));
-        routing
+        // FIXME:
+        // routing.set_request_hook(move |req| req_hook.request(req));
+        // routing.set_response_hook(move |res| res_hook.response(res));
+        cm
     }
 }
 
@@ -52,7 +56,7 @@ struct Hook {
 impl Hook {
     fn new(inner: Arc<Inner>) -> Self {
         let id = inner.register_id();
-        Hook { id, inner }
+        Self { id, inner }
     }
 
     // Invoke request hook.
@@ -114,7 +118,7 @@ struct State {
 
 impl State {
     fn new(rng: SeededRng) -> Self {
-        State {
+        Self {
             rng,
             all: Vec::new(),
             next: 0,

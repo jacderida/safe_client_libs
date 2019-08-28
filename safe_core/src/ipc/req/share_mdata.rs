@@ -10,7 +10,8 @@ use super::{permission_set_clone_from_repr_c, permission_set_into_repr_c, AppExc
 use crate::ffi::ipc::req as ffi;
 use crate::ipc::errors::IpcError;
 use ffi_utils::{vec_into_raw_parts, ReprC};
-use routing::{PermissionSet, XorName};
+use safe_nd::{MDataPermissionSet, XorName};
+use serde::{Deserialize, Serialize};
 use std::slice;
 
 /// Represents a request to share mutable data.
@@ -30,7 +31,7 @@ pub struct ShareMData {
     /// The mutable data name.
     pub name: XorName,
     /// The permissions being requested.
-    pub perms: PermissionSet,
+    pub perms: MDataPermissionSet,
 }
 
 impl ShareMDataReq {

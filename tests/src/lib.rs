@@ -36,7 +36,11 @@
     unused_comparisons,
     unused_features,
     unused_parens,
-    while_true
+    while_true,
+    clippy::all,
+    clippy::option_unwrap_used,
+    clippy::unicode_not_nfc,
+    clippy::wrong_pub_self_convention
 )]
 #![warn(
     trivial_casts,
@@ -52,40 +56,21 @@
     missing_debug_implementations,
     variant_size_differences
 )]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    deny(clippy, unicode_not_nfc, wrong_pub_self_convention, option_unwrap_used)
-)]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    allow(implicit_hasher, too_many_arguments, use_debug)
-)]
-
-extern crate ffi_utils;
-extern crate futures;
-extern crate safe_app;
-extern crate safe_authenticator;
-#[macro_use]
-extern crate safe_core;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
-#[macro_use]
-extern crate unwrap;
 
 mod real_network;
 
 use futures::future::Future;
-use safe_app::{run, App, Client, ImmutableData};
+use safe_app::{run, App, Client, PubImmutableData};
 use safe_core::utils;
 use safe_core::utils::test_utils::random_client;
+use unwrap::unwrap;
 
 // Test unregistered clients.
 // 1. Have a registered client PUT something on the network.
 // 2. Try to read it as unregistered.
 #[test]
 fn unregistered_client() {
-    let orig_data = ImmutableData::new(unwrap!(utils::generate_random_vector(30)));
+    let orig_data = PubImmutableData::new(unwrap!(utils::generate_random_vector(30)));
 
     // Registered Client PUTs something onto the network.
     {
@@ -96,8 +81,8 @@ fn unregistered_client() {
     // Unregistered Client should be able to retrieve the data.
     let app = unwrap!(App::unregistered(|| (), None));
     unwrap!(run(&app, move |client, _context| {
-        let _ = client.get_idata(*orig_data.name()).map(move |data| {
-            assert_eq!(data, orig_data);
+        let _ = client.get_idata(*orig_data.address()).map(move |data| {
+            assert_eq!(data, orig_data.into());
         });
         Ok(())
     }));

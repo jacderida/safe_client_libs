@@ -1,7 +1,7 @@
 // Copyright 2018 MaidSafe.net limited.
 //
 // This SAFE Network Software is licensed to you under the MIT license <LICENSE-MIT
-// http://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
+// https://opensource.org/licenses/MIT> or the Modified BSD license <LICENSE-BSD
 // https://opensource.org/licenses/BSD-3-Clause>, at your option. This file may not be copied,
 // modified, or distributed except according to those terms. Please review the Licences for the
 // specific language governing permissions and limitations relating to use of the SAFE Network
@@ -32,7 +32,7 @@ use tiny_keccak::sha3_256;
 #[no_mangle]
 pub static SIGN_WITH_APP: SignSecKeyHandle = NULL_OBJECT_HANDLE;
 
-/// Get the public signing key of the app.
+/// Gets the public signing key of the app.
 #[no_mangle]
 pub unsafe extern "C" fn app_pub_sign_key(
     app: *const App,
@@ -41,15 +41,13 @@ pub unsafe extern "C" fn app_pub_sign_key(
 ) {
     catch_unwind_cb(user_data, o_cb, || {
         send_sync(app, user_data, o_cb, move |client, context| {
-            let key = client
-                .public_signing_key()
-                .ok_or(AppError::UnregisteredClientAccess)?;
+            let key = client.public_signing_key();
             Ok(context.object_cache().insert_pub_sign_key(key))
         })
     })
 }
 
-/// Generate a new sign key pair (public & private key).
+/// Generates a new sign key pair (public & private key).
 #[no_mangle]
 pub unsafe extern "C" fn sign_generate_key_pair(
     app: *const App,
@@ -76,7 +74,7 @@ pub unsafe extern "C" fn sign_generate_key_pair(
     })
 }
 
-/// Create new public signing key from raw array.
+/// Creates new public signing key from raw array.
 #[no_mangle]
 pub unsafe extern "C" fn sign_pub_key_new(
     app: *const App,
@@ -92,7 +90,7 @@ pub unsafe extern "C" fn sign_pub_key_new(
     })
 }
 
-/// Retrieve the public signing key as a raw array.
+/// Retrieves the public signing key as a raw array.
 #[no_mangle]
 pub unsafe extern "C" fn sign_pub_key_get(
     app: *const App,
@@ -112,7 +110,7 @@ pub unsafe extern "C" fn sign_pub_key_get(
     })
 }
 
-/// Free public signing key from memory.
+/// Frees public signing key from memory.
 #[no_mangle]
 pub unsafe extern "C" fn sign_pub_key_free(
     app: *const App,
@@ -128,7 +126,7 @@ pub unsafe extern "C" fn sign_pub_key_free(
     })
 }
 
-/// Create new secret signing key from raw array.
+/// Creates new secret signing key from raw array.
 #[no_mangle]
 pub unsafe extern "C" fn sign_sec_key_new(
     app: *const App,
@@ -144,7 +142,7 @@ pub unsafe extern "C" fn sign_sec_key_new(
     })
 }
 
-/// Retrieve the secret signing key as a raw array.
+/// Retrieves the secret signing key as a raw array.
 #[no_mangle]
 pub unsafe extern "C" fn sign_sec_key_get(
     app: *const App,
@@ -164,7 +162,7 @@ pub unsafe extern "C" fn sign_sec_key_get(
     })
 }
 
-/// Free secret signing key from memory.
+/// Frees secret signing key from memory.
 #[no_mangle]
 pub unsafe extern "C" fn sign_sec_key_free(
     app: *const App,
@@ -180,7 +178,7 @@ pub unsafe extern "C" fn sign_sec_key_free(
     })
 }
 
-/// Get the public encryption key of the app.
+/// Gets the public encryption key of the app.
 #[no_mangle]
 pub unsafe extern "C" fn app_pub_enc_key(
     app: *const App,
@@ -193,15 +191,13 @@ pub unsafe extern "C" fn app_pub_enc_key(
 ) {
     catch_unwind_cb(user_data, o_cb, || {
         send_sync(app, user_data, o_cb, move |client, context| {
-            let key = client
-                .public_encryption_key()
-                .ok_or(AppError::UnregisteredClientAccess)?;
+            let key = client.public_encryption_key();
             Ok(context.object_cache().insert_encrypt_key(key))
         })
     })
 }
 
-/// Generate a new encryption key pair (public & private key).
+/// Generates a new encryption key pair (public & private key).
 #[no_mangle]
 pub unsafe extern "C" fn enc_generate_key_pair(
     app: *const App,
@@ -228,7 +224,7 @@ pub unsafe extern "C" fn enc_generate_key_pair(
     })
 }
 
-/// Create new public encryption key from raw array.
+/// Creates new public encryption key from raw array.
 #[no_mangle]
 pub unsafe extern "C" fn enc_pub_key_new(
     app: *const App,
@@ -248,7 +244,7 @@ pub unsafe extern "C" fn enc_pub_key_new(
     })
 }
 
-/// Retrieve the public encryption key as a raw array.
+/// Retrieves the public encryption key as a raw array.
 #[no_mangle]
 pub unsafe extern "C" fn enc_pub_key_get(
     app: *const App,
@@ -268,7 +264,7 @@ pub unsafe extern "C" fn enc_pub_key_get(
     })
 }
 
-/// Free encryption key from memory.
+/// Frees public encryption key from memory.
 #[no_mangle]
 pub unsafe extern "C" fn enc_pub_key_free(
     app: *const App,
@@ -284,7 +280,7 @@ pub unsafe extern "C" fn enc_pub_key_free(
     })
 }
 
-/// Create new private encryption key from raw array.
+/// Creates new private encryption key from raw array.
 #[no_mangle]
 pub unsafe extern "C" fn enc_secret_key_new(
     app: *const App,
@@ -304,7 +300,7 @@ pub unsafe extern "C" fn enc_secret_key_new(
     })
 }
 
-/// Retrieve the private encryption key as a raw array.
+/// Retrieves the private encryption key as a raw array.
 #[no_mangle]
 pub unsafe extern "C" fn enc_secret_key_get(
     app: *const App,
@@ -324,7 +320,7 @@ pub unsafe extern "C" fn enc_secret_key_get(
     })
 }
 
-/// Free private key from memory.
+/// Frees private encryption key from memory.
 #[no_mangle]
 pub unsafe extern "C" fn enc_secret_key_free(
     app: *const App,
@@ -363,15 +359,7 @@ pub unsafe extern "C" fn sign(
 
         (*app).send(move |client, context| {
             let sign_sk = if sign_sk_h == SIGN_WITH_APP {
-                try_cb!(
-                    client
-                        .secret_signing_key()
-                        .ok_or_else(|| AppError::Unexpected(
-                            "Secret signing key not found".to_string()
-                        )),
-                    user_data,
-                    o_cb
-                )
+                client.secret_signing_key()
             } else {
                 let sign_sk = try_cb!(
                     context.object_cache().get_sec_sign_key(sign_sk_h),
@@ -395,6 +383,7 @@ pub unsafe extern "C" fn sign(
 }
 
 /// Verifies signed data using a given public sign key.
+///
 /// Returns an error if the message could not be verified.
 #[no_mangle]
 pub unsafe extern "C" fn verify(
@@ -439,7 +428,8 @@ pub unsafe extern "C" fn verify(
 }
 
 /// Encrypts arbitrary data using a given key pair.
-/// You should provide a recipient's public key and a sender's secret key.
+///
+/// You should provide a sender's secret key and a recipient's public key.
 #[no_mangle]
 pub unsafe extern "C" fn encrypt(
     app: *const App,
@@ -488,6 +478,7 @@ pub unsafe extern "C" fn encrypt(
 }
 
 /// Decrypts arbitrary data using a given key pair.
+///
 /// You should provide a sender's public key and a recipient's secret key.
 #[no_mangle]
 pub unsafe extern "C" fn decrypt(
@@ -546,6 +537,7 @@ pub unsafe extern "C" fn decrypt(
 }
 
 /// Encrypts arbitrary data for a single recipient.
+///
 /// You should provide a recipient's public key.
 #[no_mangle]
 pub unsafe extern "C" fn encrypt_sealed_box(
@@ -586,6 +578,7 @@ pub unsafe extern "C" fn encrypt_sealed_box(
 }
 
 /// Decrypts arbitrary data for a single recipient.
+///
 /// You should provide a recipients's private and public key.
 #[no_mangle]
 pub unsafe extern "C" fn decrypt_sealed_box(
@@ -866,7 +859,7 @@ mod tests {
         let app_sign_key1_h = unsafe { unwrap!(call_1(|ud, cb| app_pub_sign_key(&app, ud, cb))) };
 
         let app_sign_key1 = unwrap!(run(&app, move |client, context| {
-            let app_sign_key1 = unwrap!(client.public_signing_key());
+            let app_sign_key1 = client.public_signing_key();
             let app_sign_key2 = unwrap!(context.object_cache().get_pub_sign_key(app_sign_key1_h));
             assert_eq!(app_sign_key1, *app_sign_key2);
 
@@ -924,7 +917,7 @@ mod tests {
         let app = create_app();
 
         let app_sign_key1 = unwrap!(run(&app, move |client, _| {
-            let app_sign_key1 = unwrap!(client.secret_signing_key());
+            let app_sign_key1 = client.secret_signing_key();
 
             Ok(app_sign_key1)
         }));
@@ -979,7 +972,7 @@ mod tests {
         let app_enc_key1_h = unsafe { unwrap!(call_1(|ud, cb| app_pub_enc_key(&app, ud, cb))) };
 
         let app_enc_key1 = unwrap!(run(&app, move |client, context| {
-            let app_enc_key1 = unwrap!(client.public_encryption_key());
+            let app_enc_key1 = client.public_encryption_key();
             let app_enc_key2 = unwrap!(context.object_cache().get_encrypt_key(app_enc_key1_h));
             assert_eq!(app_enc_key1, *app_enc_key2);
 

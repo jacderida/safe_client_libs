@@ -23,7 +23,15 @@ use rust_sodium::crypto::sign;
 use std::fmt::Debug;
 use std::sync::mpsc as std_mpsc;
 use std::{iter, u8};
-use tokio_core::reactor::{Core, Handle};
+use threshold_crypto::{PublicKey, SecretKey};
+use tokio::runtime::current_thread::{Handle, Runtime};
+
+/// Generates a random BLS secret and public keypair.
+pub fn gen_bls_keys() -> (SecretKey, PublicKey) {
+    let sk = SecretKey::random();
+    let pk = sk.public_key();
+    (sk, pk)
+}
 
 /// Generates random public keys
 pub fn generate_public_keys(len: usize) -> Vec<sign::PublicKey> {
@@ -63,19 +71,13 @@ where
     T: Send + 'static,
     E: Debug,
 {
-    let n = |net_event| panic!("Unexpected NetworkEvent occurred: {:?}", net_event);
+    // FIXME: in stage 1 disconnection is a natural event, so instead of panicking we
+    // just print it out.
+    let n = |net_event| trace!("Unexpected NetworkEvent occurred: {:?}", net_event);
     let c = |el_h, core_tx, net_tx| {
         let acc_locator = unwrap!(utils::generate_random_string(10));
         let acc_password = unwrap!(utils::generate_random_string(10));
-        let invitation = unwrap!(utils::generate_random_string(10));
-        CoreClient::new(
-            &acc_locator,
-            &acc_password,
-            &invitation,
-            el_h,
-            core_tx,
-            net_tx,
-        )
+        CoreClient::new(&acc_locator, &acc_password, el_h, core_tx, net_tx)
     };
     setup_client_with_net_obs(&(), c, n, r)
 }
@@ -95,7 +97,9 @@ where
     E: Debug,
     F: Debug,
 {
-    let n = |net_event| panic!("Unexpected NetworkEvent occurred: {:?}", net_event);
+    // FIXME: in stage 1 disconnection is a natural event, so instead of panicking we
+    // just print it out.
+    let n = |net_event| trace!("Unexpected NetworkEvent occurred: {:?}", net_event);
     setup_client_with_net_obs(context, c, n, r)
 }
 
@@ -120,7 +124,7 @@ where
     E: Debug,
     F: Debug,
 {
-    let el = unwrap!(Core::new());
+    let mut el = unwrap!(Runtime::new());
     let el_h = el.handle();
 
     let (core_tx, core_rx) = mpsc::unbounded();
@@ -133,7 +137,7 @@ where
             Ok(())
         })
         .map_err(|e| panic!("Network event stream error: {:?}", e));
-    el_h.spawn(net_fut);
+    let _ = el.spawn(net_fut);
 
     let core_tx_clone = core_tx.clone();
     let (result_tx, result_rx) = std_mpsc::channel();

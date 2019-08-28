@@ -11,29 +11,29 @@ use crate::errors::CoreError;
 use crate::nfs::{NfsError, NfsFuture};
 use crate::utils::FutureExt;
 use futures::Future;
-use routing::{ClientError, MutableData, PermissionSet, User, Value};
+use safe_nd::{Error as SndError, MDataPermissionSet, MDataSeqEntries, PublicKey, SeqMutableData};
 use std::collections::BTreeMap;
 
 /// Create a new directory based on the provided `MDataInfo`.
 pub fn create_dir(
     client: &impl Client,
     dir: &MDataInfo,
-    contents: BTreeMap<Vec<u8>, Value>,
-    perms: BTreeMap<User, PermissionSet>,
+    contents: MDataSeqEntries,
+    perms: BTreeMap<PublicKey, MDataPermissionSet>,
 ) -> Box<NfsFuture<()>> {
-    let pub_key = fry!(client
-        .owner_key()
-        .ok_or_else(|| NfsError::Unexpected("Owner key not found".to_string())));
-    let owners = btree_set![pub_key];
-    let dir_md = fry!(
-        MutableData::new(dir.name, dir.type_tag, perms, contents, owners).map_err(CoreError::from)
-    );
+    let pub_key = client.owner_key();
+
+    let dir_md =
+        SeqMutableData::new_with_data(dir.name(), dir.type_tag(), contents, perms, pub_key);
+
+    trace!("Creating new directory: {:?}", dir);
     client
-        .put_mdata(dir_md)
+        .put_seq_mutable_data(dir_md)
         .or_else(move |err| {
+            trace!("Error: {:?}", err);
             match err {
                 // This dir has been already created
-                CoreError::RoutingClientError(ClientError::DataExists) => Ok(()),
+                CoreError::DataError(SndError::DataExists) => Ok(()),
                 e => Err(e),
             }
         })
