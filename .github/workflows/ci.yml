@@ -1,0 +1,52 @@
+on: [push, pull_request]
+name: ci
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ${{ matrix.os }}
+    env:
+      SAFE_MOCK_IN_MEMORY_STORAGE: 1
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v1
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --verbose --release --features=mock-network --manifest-path=safe_core/Cargo.toml
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --verbose --release --features=mock-network --manifest-path=safe_authenticator/Cargo.toml
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --verbose --release --features=mock-network --manifest-path=safe_app/Cargo.toml
+  build:
+    name: 'build and deploy'
+    runs-on: ${{ matrix.os }}
+    env:
+      SAFE_MOCK_IN_MEMORY_STORAGE: 1
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v1
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --verbose --features=testing --release --lib --tests --manifest-path=safe_authenticator/Cargo.toml
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --verbose --features=testing --release --lib --tests --manifest-path=safe_authenticator/Cargo.toml
